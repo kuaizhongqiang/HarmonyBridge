@@ -87,7 +87,7 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
 | `CoreService.Stop` | `{}` | `{stopped}` | ✅ |
 | `CoreService.Status` | `{}` | `{running, version, lastError?}` | ✅（`fd` 字段随 §5 移除） |
 | `CoreService.RuntimeInfo` | `{}` | `{socksPort, httpPort, logPath?}` | ❌ 待实现 |
-| `ConfigService.Generate` | `{nodeId, routingMode, extra, assetDir}` | `{configJson, socksPort, httpPort, outboundTag, protocol, transport, security, geoAssets, notes[]}` | ✅ 已实现（`golang/service/config`） |
+| `ConfigService.Generate` | `{nodeId, routingMode, extra, assetDir, bypassChina?}` | `{configJson, socksPort, httpPort, outboundTag, protocol, transport, security, geoAssets, notes[]}` | ✅ 已实现（`golang/service/config`） |
 | `LogService.Tail` | `{limit}` | `{lines[], count}` | ✅ |
 | `LogService.Clear` | `{}` | `{cleared}` | ✅ |
 | `PingService.Tcping` | `{host, port, timeoutMs?}` | `{latencyMs, reachable, address, ip?, resolveMs?, error?}` | ⚠️ 字段名为 `delayMs`，待改名 |
@@ -121,6 +121,14 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
    `nodeId` 仅用于日志与回显 —— Go 侧没有也不应该有节点表。实现见
    `entry/src/main/golang/service/config/{config.go,build.go}`，两侧字段名的守卫是
    `config_test.go` 的 `TestParseNodeMatchesArktsFieldNames`。
+   **后续又补了 `bypassChina`（可选）**：只在 `routingMode=rule` 时有意义，
+   `true` = 白名单「绕过大陆」（大陆直连、其余走代理），`false` = 黑名单
+   （已知被墙走代理、其余直连），对应 v2rayN 的 `Sample/custom_routing_white` /
+   `custom_routing_black`。它是 `*bool`：**字段缺失按 `true` 处理**，理由是 ArkTS 侧
+   `AppSettings.bypassChina` 的默认值就是 `true`，漏传若退化成黑名单会变成
+   "用户以为在绕过大陆、实际不是"的静默降级。这个字段此前在 UI 上存在但**从未传过来**，
+   是一个空开关（已修）。
+
    同批新增的 `assetDir` 参数用于探测 `geoip.dat` / `geosite.dat`：**缺文件时内核会拒绝
    含 `geoip:`/`geosite:` 规则的整份配置**（不是忽略那一条），因此 rule 模式必须先探测
    再决定是否生成按国家分流的规则。结果里的 `configJson` 由 ArkTS 侧落盘

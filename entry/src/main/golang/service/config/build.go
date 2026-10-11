@@ -43,30 +43,52 @@ const (
 	TagProxy  = "proxy"
 	TagDirect = "direct"
 	TagBlock  = "block"
+
+	// DnsTag 是 dns 配置的 tag，让 routing 能用 inboundTag 命中
+	// "由内核 DNS 模块发出的查询"。对齐 v2rayN 的 Global.DnsTag
+	// （V2rayDnsService.cs:111）与 Sample/dns_v2ray_normal 里 dnsObj["tag"]。
+	DnsTag = "dns-module"
+
+	// DomainDirectDNS / DomainRemoteDNS / remoteDoH 取自 v2rayN
+	// `Global.DomainDirectDNSAddress` / `Global.DomainRemoteDNSAddress` 的首项
+	// 以及 Sample/dns_v2ray_normal 的兜底列表。
+	DomainDirectDNS = "223.5.5.5"
+	DomainRemoteDNS = "1.1.1.1"
+	remoteDoH       = "https://dns.google/dns-query"
+)
+
+// 降级提示。geo 资源缺位时规则会退化成"聊胜于无"的形态，必须让用户知道。
+const (
+	msgNoGeoDNS = "dns: 未打包 geoip.dat / geosite.dat，无法生成「国内域名走国内 DNS」" +
+		"的定向解析器，已降级为纯国外 DNS；补齐资源后才会启用国内外分流（见 docs/design/core.md）"
+
+	msgNoGeoRule = "routing=rule: 未打包 geoip.dat / geosite.dat，规则里所有 " +
+		"geoip:/geosite: 条目已整体跳过（缺文件时内核会拒绝整份配置）；" +
+		"当前只能保证「私有网段 + 中国公共 DNS」直连与协议层面的兜底"
 )
 
 // Node 是 ArkTS 侧 NodeJson 的镜像。json tag 必须与 ServerNode.ets#nodeToJson 完全一致。
 type Node struct {
-	ID             string `json:"id"`
-	Remarks        string `json:"remarks"`
-	Protocol       string `json:"protocol"`
-	Address        string `json:"address"`
-	Port           int    `json:"port"`
-	Transport      string `json:"transport"`
-	Security       string `json:"security"`
-	Host           string `json:"host"`
-	Path           string `json:"path"`
-	ServiceName    string `json:"serviceName"`
-	RawHeaderType  string `json:"rawHeaderType"`
-	KCPHeaderType  string `json:"kcpHeaderType"`
-	XHTTPMode      string `json:"xhttpMode"`
-	XHTTPExtra     string `json:"xhttpExtra"`
-	GRPCMode       string `json:"grpcMode"`
-	FinalMask      string `json:"finalmask"`
-	SNI            string `json:"sni"`
-	Fingerprint    string `json:"fingerprint"`
-	ALPN           string `json:"alpn"`
-	AllowInsecure  bool   `json:"allowInsecure"`
+	ID            string `json:"id"`
+	Remarks       string `json:"remarks"`
+	Protocol      string `json:"protocol"`
+	Address       string `json:"address"`
+	Port          int    `json:"port"`
+	Transport     string `json:"transport"`
+	Security      string `json:"security"`
+	Host          string `json:"host"`
+	Path          string `json:"path"`
+	ServiceName   string `json:"serviceName"`
+	RawHeaderType string `json:"rawHeaderType"`
+	KCPHeaderType string `json:"kcpHeaderType"`
+	XHTTPMode     string `json:"xhttpMode"`
+	XHTTPExtra    string `json:"xhttpExtra"`
+	GRPCMode      string `json:"grpcMode"`
+	FinalMask     string `json:"finalmask"`
+	SNI           string `json:"sni"`
+	Fingerprint   string `json:"fingerprint"`
+	ALPN          string `json:"alpn"`
+	AllowInsecure bool   `json:"allowInsecure"`
 	// allowInsecure 的三个替代字段（v2rayN 面板与分享链接 pcs/vcn 都指向它们）。
 	PinnedPeerCertSha256 string `json:"pinnedPeerCertSha256"`
 	VerifyPeerCertByName string `json:"verifyPeerCertByName"`
@@ -75,14 +97,14 @@ type Node struct {
 	// TLSCertificates 是 certificates[] 的 JSON 文本（形状见内核 TLSCertConfig）。
 	TLSCertificates string `json:"tlsCertificates"`
 	PublicKey       string `json:"publicKey"`
-	ShortID        string `json:"shortId"`
-	SpiderX        string `json:"spiderX"`
-	UserID         string `json:"userId"`
-	AlterID        int    `json:"alterId"`
-	SecurityCipher string `json:"securityCipher"`
-	Password       string `json:"password"`
-	Flow           string `json:"flow"`
-	MuxEnabled     bool   `json:"muxEnabled"`
+	ShortID         string `json:"shortId"`
+	SpiderX         string `json:"spiderX"`
+	UserID          string `json:"userId"`
+	AlterID         int    `json:"alterId"`
+	SecurityCipher  string `json:"securityCipher"`
+	Password        string `json:"password"`
+	Flow            string `json:"flow"`
+	MuxEnabled      bool   `json:"muxEnabled"`
 }
 
 // ParseNode 解析 ArkTS 传来的节点 JSON。
@@ -117,12 +139,31 @@ type LogConfig struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// DNSConfig 对应 infra/conf/dns.go。这里只给最保守的形态：一组公共 DNS +
-// IPv4 优先。真正的 DNS 分流（按域名走国内/国外解析器）依赖 geosite 资源，
-// 属于后续工作流，见 docs/design/core.md。
+// DNSConfig 对应 infra/conf/dns.go 的 DNSConfig。
+//
+// 形态对齐 v2rayN 的 DNS 分流（Sample/dns_v2ray_normal + V2rayDnsService.cs）：
+//
+//   - Servers 是**异构数组**：既可以是纯地址字符串，也可以是带
+//     domains / expectIPs 的定向服务器对象。所以类型是 []any 而不是 []string。
+//   - Tag 让 routing 能命中内核 DNS 模块发出的查询（见 DnsTag）。
+//   - Hosts 是 DoH 域名的静态映射，缺了它解析 dns.google 会形成引导环。
 type DNSConfig struct {
-	Servers       []string `json:"servers"`
-	QueryStrategy string   `json:"queryStrategy,omitempty"`
+	Tag           string              `json:"tag,omitempty"`
+	Hosts         map[string][]string `json:"hosts,omitempty"`
+	Servers       []any               `json:"servers"`
+	QueryStrategy string              `json:"queryStrategy,omitempty"`
+}
+
+// DNSServer 对应 infra/conf/dns.go 的 NameServer（对象形态）。
+//
+// 字段名以 v2rayN 实际写出的为准：注意是 `expectIPs`。
+// 内核两种拼法都接受（infra/conf/dns.go:24-25 同时存在 expectedIPs 与 expectIPs），
+// 这里跟着 v2rayN 走，便于两边对照。
+type DNSServer struct {
+	Address      string   `json:"address"`
+	SkipFallback bool     `json:"skipFallback,omitempty"`
+	Domains      []string `json:"domains,omitempty"`
+	ExpectIPs    []string `json:"expectIPs,omitempty"`
 }
 
 // Inbound 对应 infra/conf/xray.go 的 InboundDetourConfig（取我们用到的那几个字段）。
@@ -239,7 +280,8 @@ type RoutingConfig struct {
 	Rules          []RoutingRule `json:"rules"`
 }
 
-// RoutingRule 对应 infra/conf/router.go 的 Rule。
+// RoutingRule 对应 infra/conf/router.go 的 Rule（字段名见该文件 531-551 行的
+// RawFieldRule：domain / ip / port / network / inboundTag / protocol / outboundTag）。
 type RoutingRule struct {
 	Type        string   `json:"type"`
 	OutboundTag string   `json:"outboundTag"`
@@ -247,6 +289,11 @@ type RoutingRule struct {
 	IP          []string `json:"ip,omitempty"`
 	Port        string   `json:"port,omitempty"`
 	Network     string   `json:"network,omitempty"`
+	// InboundTag 用于命中"由内核 DNS 模块发出的查询"（值为 DnsTag）。
+	InboundTag []string `json:"inboundTag,omitempty"`
+	// Protocol 是按嗅探结果匹配的协议名（当前只用到 "bittorrent"）。
+	// 本版内核的嗅探器是内建的，不看 destOverride，见 blacklistRules 的说明。
+	Protocol []string `json:"protocol,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +375,17 @@ type Options struct {
 	// geoip.dat），整个配置会被拒，而不是忽略那条规则。所以资源没打包时必须
 	// 不生成 geo 规则，否则 CoreService.Start 会直接失败。
 	GeoAssets bool
+
+	// BypassChina 只在 RoutingMode == "rule" 时起作用：
+	//
+	//	true  -> 白名单「绕过大陆」：大陆直连、其余走代理
+	//	         （v2rayN ServiceLib/Sample/custom_routing_white）
+	//	false -> 黑名单：已知被墙的走代理、其余直连
+	//	         （v2rayN ServiceLib/Sample/custom_routing_black）
+	//
+	// 这个字段此前在 ArkTS 侧存在（AppSettings.bypassChina，默认 true）
+	// 但**从未传到这里**，所以那个开关拨动时行为完全不变。现在接上了。
+	BypassChina bool
 }
 
 // Build 把节点编译成一份完整的 Xray 配置，并返回需要让用户知道的提示。
@@ -357,10 +415,7 @@ func Build(node *Node, opts Options) (*Config, []string, error) {
 
 	cfg := &Config{
 		Log: &LogConfig{LogLevel: logLevel},
-		DNS: &DNSConfig{
-			Servers:       []string{"1.1.1.1", "8.8.8.8"},
-			QueryStrategy: "UseIPv4",
-		},
+		DNS: buildDNS(opts, &notes),
 		Inbounds: []Inbound{
 			{
 				Tag:      "tun-in",
@@ -370,8 +425,17 @@ func Build(node *Node, opts Options) (*Config, []string, error) {
 					"MTU":  DefaultMTU,
 				},
 				Sniffing: &SniffingConfig{
-					Enabled:      true,
+					Enabled: true,
+					// destOverride 只能写 http / tls / quic / fakedns
+					// （infra/conf/xray.go:75-86，写别的会报 "unknown protocol"）；
+					// bittorrent 的嗅探是本版内核**内建**的，不在这里声明，
+					// 见 app/dispatcher/sniffer.go:39-44 与 blacklistRules 的说明。
 					DestOverride: []string{"http", "tls"},
+					// routeOnly=true：嗅探出的域名**只用于路由匹配**，不改写实际目的地。
+					// 对齐 v2rayN 对 TUN 入站的处理（V2rayInboundService.cs:90）。
+					// 这对"按域名分流"是关键：否则嗅探会改写目标域名，
+					// 让 geosite:cn 命中的后果扩散到连接本身。
+					RouteOnly: true,
 				},
 			},
 			{
@@ -397,34 +461,65 @@ func Build(node *Node, opts Options) (*Config, []string, error) {
 
 	// routing：proxy 永远是 outbounds[0]（Xray 的默认出站），
 	// 所以"直连模式"必须靠一条全量规则把流量改派给 direct，而不是调整顺序。
-	cfg.Routing = buildRouting(opts.RoutingMode, opts.GeoAssets, &notes)
+	cfg.Routing = buildRouting(opts, &notes)
 	return cfg, notes, nil
 }
 
-// privateCIDRs 是不需要 geoip.dat 就能表达的私有/保留网段。
+// buildDNS 生成 DNS 配置 —— 这一块直接决定"绕过大陆"成不成立。
 //
-// 之所以自己列 CIDR 而不用 `geoip:private`：后者同样需要 geoip.dat，
-// 缺文件时内核直接报错（见 Options.GeoAssets 的说明）。
-var privateCIDRs = []string{
-	"127.0.0.0/8",
-	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
-	"169.254.0.0/16",
-	"100.64.0.0/10",
-	"::1/128",
-	"fc00::/7",
-	"fe80::/10",
+// 此前无论什么模式都只用 1.1.1.1 / 8.8.8.8，而 rule 模式里还有一条
+// 「port 53 -> proxy」：等于**用国外 DNS 解析国内域名，再拿解析结果去匹配
+// geoip:cn**（rule 模式的 domainStrategy 是 IPIfNonMatch，会先解析再匹配），
+// 规则必然失配。这里改成 v2rayN 的做法（Sample/dns_v2ray_normal）：
+//
+//   - 国内域名 (geosite:cn) 交给国内 DNS 223.5.5.5，并用 expectIPs=geoip:cn 约束，
+//     防止国内 DNS 返回境外 IP（CDN 场景下很常见）；
+//   - 国外域名（google 等）交给 1.1.1.1，skipFallback 避免回落到国外解析器；
+//   - hosts 提供 DoH 域名的静态映射，否则解析 dns.google 本身就是引导环。
+//
+// 前两条需要 geosite.dat / geoip.dat，因此仍然受 Options.GeoAssets 门控：
+// 资源没就位时降级为纯国外 DNS 并给出 note，而不是生成一份会被拒的配置。
+//
+// 对于 direct 模式，DNS 走国外解析器是无害的（本来就不做分流），统一处理。
+func buildDNS(opts Options, notes *[]string) *DNSConfig {
+	dns := &DNSConfig{
+		Tag: DnsTag,
+		// v2rayN 的 BlockAAAAQuery 等价物：只查 A 记录，避免 IPv6 优先导致的
+		// 绕行与连接失败（与之前的 QueryStrategy 行为一致，未改语义）。
+		QueryStrategy: "UseIPv4",
+		Servers:       make([]any, 0, 4),
+	}
+	if opts.GeoAssets {
+		dns.Hosts = predefinedHosts
+		dns.Servers = append(dns.Servers,
+			DNSServer{
+				Address:      DomainRemoteDNS,
+				SkipFallback: true,
+				Domains:      []string{"geosite:google"},
+			},
+			DNSServer{
+				Address:      DomainDirectDNS,
+				SkipFallback: true,
+				Domains:      []string{"geosite:cn"},
+				ExpectIPs:    []string{"geoip:cn"},
+			},
+		)
+	} else {
+		*notes = append(*notes, msgNoGeoDNS)
+	}
+	// 兜底解析器：v2rayN 的 remoteDNSAddress（Global.DomainRemoteDNSAddress 首项）
+	// 加上一个 DoH。它们的域名解析靠上面的 hosts。
+	dns.Servers = append(dns.Servers, DomainRemoteDNS, "8.8.8.8", remoteDoH)
+	return dns
 }
 
 // buildRouting 按路由模式生成规则。
 //
-// rule 模式分两档：
-//   - 私有网段直连：用显式 CIDR，任何情况下都能用；
-//   - 按国家分流：需要 geoip.dat / geosite.dat，只有 opts.GeoAssets 为真时才写，
-//     否则配置会被内核拒绝。
-func buildRouting(mode string, geoAssets bool, notes *[]string) *RoutingConfig {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
+// direct 与 global 两种模式的语义没有变化；rule 模式现在按 opts.BypassChina
+// 在白名单 / 黑名单两套预设之间切换（对齐 v2rayN 的 custom_routing_white /
+// custom_routing_black），见 buildRuleRouting。
+func buildRouting(opts Options, notes *[]string) *RoutingConfig {
+	switch strings.ToLower(strings.TrimSpace(opts.RoutingMode)) {
 	case "direct":
 		return &RoutingConfig{
 			DomainStrategy: "AsIs",
@@ -433,21 +528,7 @@ func buildRouting(mode string, geoAssets bool, notes *[]string) *RoutingConfig {
 			},
 		}
 	case "rule":
-		rules := []RoutingRule{
-			{Type: "field", IP: privateCIDRs, OutboundTag: TagDirect},
-			{Type: "field", Port: "53", OutboundTag: TagProxy},
-		}
-		if geoAssets {
-			rules = append(rules,
-				RoutingRule{Type: "field", Domain: []string{"geosite:private", "geosite:cn"}, OutboundTag: TagDirect},
-				RoutingRule{Type: "field", IP: []string{"geoip:cn"}, OutboundTag: TagDirect},
-			)
-		} else {
-			*notes = append(*notes,
-				"routing=rule: 未打包 geoip.dat / geosite.dat，已降级为「私有网段直连 + 其余走代理」；"+
-					"补齐资源后才会启用按国家分流（见 docs/design/core.md）")
-		}
-		return &RoutingConfig{DomainStrategy: "IPIfNonMatch", Rules: rules}
+		return buildRuleRouting(opts, notes)
 	default:
 		// global：除 DNS 外全部走代理
 		return &RoutingConfig{
@@ -457,6 +538,157 @@ func buildRouting(mode string, geoAssets bool, notes *[]string) *RoutingConfig {
 			},
 		}
 	}
+}
+
+// buildRuleRouting 生成 rule 模式（按国家/地区分流）的规则表。
+//
+//	BypassChina = true  -> 白名单：大陆直连、其余走代理（v2rayN "绕过大陆"）
+//	BypassChina = false -> 黑名单：已知被墙走代理、其余直连（v2rayN "绕过大陆(Blacklist)"）
+//
+// 两者都用 domainStrategy=IPIfNonMatch：域名先按域名规则匹配，没命中再解析成
+// IP 去匹配 ip 规则 —— 这正是"大陆域名直连"能靠 geosite:cn + geoip:cn 双保险
+// 生效的原因（v2rayN 的 GenDns 也是以 domainStrategy==IPIfNonMatch 为条件
+// 追加 DNS 走代理的规则，见 V2rayDnsService.cs:14-17）。
+func buildRuleRouting(opts Options, notes *[]string) *RoutingConfig {
+	var rules []RoutingRule
+	if opts.BypassChina {
+		rules = whitelistRules(opts.GeoAssets, notes)
+		// 白名单模式**没有**兜底直连规则，未命中任何规则的流量会落到
+		// outbounds[0]（proxy）。显式写一条「DNS 模块 -> proxy」把这件事说清楚，
+		// 对齐 v2rayN 的 V2rayDnsService.cs:111-118。
+		//
+		// 国内 DNS 的查询不会走到这条：它已经被上面的「绕过中国公共DNS IP/域名」
+		// 规则先命中了，所以最终效果是「国内 DNS 直连、国外 DNS 走代理」。
+		rules = append(rules, RoutingRule{
+			Type:        "field",
+			InboundTag:  []string{DnsTag},
+			OutboundTag: TagProxy,
+		})
+	} else {
+		rules = blacklistRules(opts.GeoAssets, notes)
+		// 黑名单模式以「最终直连」收尾，任何追加的规则都不可达，因此这里
+		// **刻意不追加** DNS 规则：国外 DNS 的代理已经由 "代理海外公共DNS IP/域名"
+		// 两条规则在兜底之前完成，行为与 v2rayN 等价。
+	}
+	return &RoutingConfig{DomainStrategy: "IPIfNonMatch", Rules: rules}
+}
+
+// whitelistRules 是「绕过大陆」白名单的规则表。
+//
+// 逐条对齐 v2rayN `ServiceLib/Sample/custom_routing_white`（1..94 行），
+// 顺序也保持一致（内核取首个命中，顺序有意义）：
+//
+//  1. block  / port=443, network=udp   阻断 QUIC，防"看起来走代理其实没走"
+//  2. proxy  / geosite:google          白名单下的保险（google 不在 cn 内）
+//  3. direct / geoip:private           局域网直连
+//  4. direct / geosite:private         局域网域名直连
+//  5. direct / 中国公共 DNS IP（35）    国内 DNS 直连 —— 分流的前提
+//  6. direct / 中国公共 DNS 域名（5）
+//  7. direct / geoip:cn                大陆 IP 直连
+//  8. direct / geosite:cn              大陆域名直连
+//
+// 需要 geoip.dat / geosite.dat 的条目（2/3/4/7/8）受 geoAssets 门控；
+// 5/6 是普通 IP 与域名，任何情况下都会生成。
+func whitelistRules(geoAssets bool, notes *[]string) []RoutingRule {
+	rules := make([]RoutingRule, 0, 9)
+	rules = append(rules, RoutingRule{
+		Type: "field", Port: "443", Network: "udp", OutboundTag: TagBlock,
+	})
+	if geoAssets {
+		rules = append(rules, RoutingRule{
+			Type: "field", Domain: []string{"geosite:google"}, OutboundTag: TagProxy,
+		})
+	}
+	rules = append(rules, RoutingRule{
+		Type: "field", IP: privateIPRule(geoAssets), OutboundTag: TagDirect,
+	})
+	if geoAssets {
+		rules = append(rules, RoutingRule{
+			Type: "field", Domain: []string{"geosite:private"}, OutboundTag: TagDirect,
+		})
+	}
+	rules = append(rules,
+		RoutingRule{Type: "field", IP: chinaPublicDNSIPs, OutboundTag: TagDirect},
+		RoutingRule{Type: "field", Domain: chinaPublicDNSDomains, OutboundTag: TagDirect},
+	)
+	if geoAssets {
+		rules = append(rules,
+			RoutingRule{Type: "field", IP: []string{"geoip:cn"}, OutboundTag: TagDirect},
+			RoutingRule{Type: "field", Domain: []string{"geosite:cn"}, OutboundTag: TagDirect},
+		)
+	} else {
+		*notes = append(*notes, msgNoGeoRule)
+	}
+	return rules
+}
+
+// blacklistRules 是「绕过大陆」黑名单的规则表。
+//
+// 逐条对齐 v2rayN `ServiceLib/Sample/custom_routing_black`（1..148 行）：
+//
+//  1. direct / protocol=bittorrent      无嗅探即无此协议；见下方说明
+//  2. proxy  / domain:api.ip.sb         出口 IP 查询必须走代理
+//  3. block  / port=443, network=udp    阻断 QUIC
+//  4. proxy  / geosite:google
+//  5. direct / geoip:private
+//  6. direct / geosite:private
+//  7. proxy  / 海外公共 DNS IP（60）     默认直连，不显式代理就会漏 DNS
+//  8. proxy  / 海外公共 DNS 域名（8）
+//  9. proxy  / geoip:facebook|fastly|google|netflix|telegram|twitter
+//  10. proxy / geosite:gfw, geosite:greatfire
+//  11. direct / port=0-65535            最终直连（黑名单的兜底）
+//
+// 关于 bittorrent：本版内核的嗅探器是**内建**的，不看 destOverride
+// （app/dispatcher/sniffer.go:39-44 固定注册 http/tls/bittorrent/quic/utp），
+// 所以只要 sniffing.enabled 为真，`protocol: ["bittorrent"]` 规则就会生效。
+// 注意 destOverride **不能**写 bittorrent —— infra/conf/xray.go:75-86 只接受
+// http/tls/quic/fakedns，写别的会直接报 "unknown protocol"。
+func blacklistRules(geoAssets bool, notes *[]string) []RoutingRule {
+	rules := make([]RoutingRule, 0, 12)
+	rules = append(rules,
+		RoutingRule{Type: "field", Protocol: []string{"bittorrent"}, OutboundTag: TagDirect},
+		RoutingRule{Type: "field", Domain: apiIPCheckDomains, OutboundTag: TagProxy},
+		RoutingRule{Type: "field", Port: "443", Network: "udp", OutboundTag: TagBlock},
+	)
+	if geoAssets {
+		rules = append(rules, RoutingRule{
+			Type: "field", Domain: []string{"geosite:google"}, OutboundTag: TagProxy,
+		})
+	}
+	rules = append(rules, RoutingRule{
+		Type: "field", IP: privateIPRule(geoAssets), OutboundTag: TagDirect,
+	})
+	if geoAssets {
+		rules = append(rules, RoutingRule{
+			Type: "field", Domain: []string{"geosite:private"}, OutboundTag: TagDirect,
+		})
+	}
+	rules = append(rules,
+		RoutingRule{Type: "field", IP: overseasPublicDNSIPs, OutboundTag: TagProxy},
+		RoutingRule{Type: "field", Domain: overseasPublicDNSDomains, OutboundTag: TagProxy},
+	)
+	if geoAssets {
+		rules = append(rules,
+			RoutingRule{Type: "field", IP: blockedGeoIPRegions, OutboundTag: TagProxy},
+			RoutingRule{Type: "field", Domain: blockedGeoSites, OutboundTag: TagProxy},
+		)
+	} else {
+		*notes = append(*notes, msgNoGeoRule)
+	}
+	// 黑名单的兜底：其余全部直连。
+	rules = append(rules, RoutingRule{Type: "field", Port: "0-65535", OutboundTag: TagDirect})
+	return rules
+}
+
+// privateIPRule 返回"局域网直连"用的 ip 列表。
+//
+// 有 geoip.dat 时用 `geoip:private`：网段由数据文件维护，不会随 RFC 变化而失效；
+// 没有资源时退回显式 CIDR，保证这条规则在任何情况下都能生成。
+func privateIPRule(geoAssets bool) []string {
+	if geoAssets {
+		return []string{"geoip:private"}
+	}
+	return privateCIDRs
 }
 
 // buildProxyOutbound 把一个节点变成协议出站。这是"协议搬运"真正落地的地方。

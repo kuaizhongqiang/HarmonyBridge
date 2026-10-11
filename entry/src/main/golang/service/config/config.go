@@ -4,9 +4,10 @@
 // 契约（docs/design/ipc-contract.md §4）：
 //
 //	ConfigService.Generate
-//	  参数 {nodeId:string, routingMode:string, extra:string}
+//	  参数 {nodeId:string, routingMode:string, extra:string,
+//	        assetDir:string, bypassChina:boolean}
 //	  结果 {configJson, socksPort, httpPort, outboundTag, protocol, transport,
-//	        security, notes[]}
+//	        security, geoAssets, notes[]}
 //
 // `extra` 是 ArkTS 侧 ServerNode#nodeToJsonText 的结果（节点完整字段的 JSON），
 // `nodeId` 只用于日志与回显：Go 侧没有节点表，也不应该有。
@@ -45,7 +46,21 @@ type GenerateRequest struct {
 	// 它决定 rule 模式能否生成按国家分流的规则：内核在装载 geoip:/geosite:
 	// 规则时缺文件是**硬失败**，所以这里必须先探测。
 	AssetDir string `json:"assetDir"`
+
+	// BypassChina 只在 RoutingMode == "rule" 时有意义：true = 白名单
+	// （大陆直连、其余走代理），false = 黑名单（已知被墙走代理、其余直连）。
+	// 对应 ArkTS 设置页的「绕过大陆」开关（AppSettings.bypassChina）。
+	//
+	// 类型是 *bool 而不是 bool：**字段缺失时按 true 处理**。ArkTS 侧
+	// AppSettings.bypassChina 的默认值就是 true，若漏传字段就退化成黑名单，
+	// 结果会是"用户以为在绕过大陆，实际不是" —— 这种静默降级比报错危险。
+	BypassChina *bool `json:"bypassChina"`
 }
+
+// defaultBypassChina 是请求里没给 bypassChina 时采用的取值。
+//
+// 与 ArkTS 的 AppSettings.bypassChina 默认值保持一致（true = 绕过大陆）。
+const defaultBypassChina = true
 
 // GenerateResponse 是 ConfigService.Generate 的结果对象。
 type GenerateResponse struct {
@@ -102,8 +117,17 @@ func (s *Service) Generate(req *GenerateRequest) (*GenerateResponse, error) {
 		return nil, fmt.Errorf("ConfigService.Generate: %w", err)
 	}
 
+	bypassChina := defaultBypassChina
+	if req.BypassChina != nil {
+		bypassChina = *req.BypassChina
+	}
+
 	geoAssets := hasGeoAssets(req.AssetDir)
-	cfg, notes, err := Build(node, Options{RoutingMode: req.RoutingMode, GeoAssets: geoAssets})
+	cfg, notes, err := Build(node, Options{
+		RoutingMode: req.RoutingMode,
+		GeoAssets:   geoAssets,
+		BypassChina: bypassChina,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("ConfigService.Generate: %w", err)
 	}

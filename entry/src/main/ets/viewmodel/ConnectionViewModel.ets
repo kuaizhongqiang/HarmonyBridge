@@ -127,6 +127,7 @@ export class ConnectionViewModel {
       const generated: ConfigPathResult = await Bridge.generateConfig(
         node.id,
         settings.routingMode.toString(),
+        settings.bypassChina,
         nodeToJsonText(node),
         ConfigStore.pathsOf(filesDir)
       );

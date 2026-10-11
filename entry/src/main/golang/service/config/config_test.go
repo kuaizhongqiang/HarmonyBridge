@@ -481,6 +481,196 @@ func TestRoutingModes(t *testing.T) {
 	}
 }
 
+// ruleWithMode 是新增测试的公共入口：显式指定 bypassChina 与 geoAssets。
+func ruleWithMode(t *testing.T, n *config.Node, bypassChina bool, geoAssets bool) (string, []string) {
+	t.Helper()
+	cfg, notes, err := config.Build(n, config.Options{
+		RoutingMode: "rule",
+		GeoAssets:   geoAssets,
+		BypassChina: bypassChina,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	text, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(text), notes
+}
+
+// TestBypassChinaWhitelistRules 断言「绕过大陆」开关拨到白名单时，
+// 规则表真的变成了 v2rayN `Sample/custom_routing_white` 的那一套。
+//
+// 这一条正是此前缺失的：AppSettings.bypassChina 存在但从未传到生成器，
+// 拨动开关行为完全不变（= 空开关）。
+func TestBypassChinaWhitelistRules(t *testing.T) {
+	text, notes := ruleWithMode(t, node("vmess"), true, false)
+	mustLoad(t, text)
+
+	must := []struct {
+		want string
+		why  string
+	}{
+		{`"network": "udp"`, "缺少「阻断 udp443」规则（QUIC 漏点）"},
+		{`"outboundTag": "block"`, "缺少 block 出站规则"},
+		{`"223.5.5.5"`, "缺少「中国公共 DNS IP 直连」规则（DNS 分流的前提）"},
+		{`"119.29.29.29"`, "中国公共 DNS IP 列表不完整"},
+		{`"domain:doh.pub"`, "缺少「中国公共 DNS 域名直连」规则"},
+		{`"192.168.0.0/16"`, "缺少私有网段直连（无 geo 资源时应退回显式 CIDR）"},
+		{`"dns-module"`, "缺少「DNS 模块 -> proxy」规则或 dns.tag"},
+		{`"inboundTag"`, "DNS 规则没有用 inboundTag 命中 DNS 模块"},
+	}
+	for _, c := range must {
+		if !strings.Contains(text, c.want) {
+			t.Errorf("%s（找不到 %s）:\n%s", c.why, c.want, text)
+		}
+	}
+	// 白名单**没有**「最终直连」兜底，未命中流量落到 outbounds[0]=proxy。
+	if strings.Contains(text, `"0-65535"`) {
+		t.Errorf("白名单模式不该出现「最终直连」兜底规则:\n%s", text)
+	}
+	if strings.Contains(text, "geoip:") || strings.Contains(text, "geosite:") {
+		t.Errorf("没有 geo 资源时不该生成 geo 规则（内核会拒绝整份配置）:\n%s", text)
+	}
+	if !hasNote(notes, "geoip.dat") {
+		t.Errorf("白名单降级时缺少提示: %v", notes)
+	}
+}
+
+// TestBlacklistRulesWhenBypassChinaOff 断言关掉开关后换成黑名单语义
+// （v2rayN `Sample/custom_routing_black`）：已知被墙走代理、其余直连。
+func TestBlacklistRulesWhenBypassChinaOff(t *testing.T) {
+	text, notes := ruleWithMode(t, node("vmess"), false, false)
+	mustLoad(t, text)
+
+	must := []struct {
+		want string
+		why  string
+	}{
+		{`"bittorrent"`, "缺少「绕过 bittorrent」规则"},
+		{`"api.ip.sb"`, "缺少「出口 IP 查询走代理」规则"},
+		{`"1.1.1.1"`, "缺少「海外公共 DNS IP 走代理」规则"},
+		{`"domain:dns.google"`, "缺少「海外公共 DNS 域名走代理」规则"},
+		{`"0-65535"`, "黑名单缺少「最终直连」兜底规则"},
+	}
+	for _, c := range must {
+		if !strings.Contains(text, c.want) {
+			t.Errorf("%s（找不到 %s）:\n%s", c.why, c.want, text)
+		}
+	}
+	// 黑名单以「最终直连」收尾，任何追加规则都不可达，因此不该生成引用
+	// dns.tag 的 routing 规则（"inboundTag" 只在白名单那条 DNS 规则里出现）。
+	// 注意 dns.tag 本身两种模式都有，所以不能拿 "dns-module" 当判据。
+	if strings.Contains(text, `"inboundTag"`) {
+		t.Errorf("黑名单以「最终直连」收尾，引用 DNS 模块的规则不可达，不该生成:\n%s", text)
+	}
+	// 中国公共 DNS 的直连规则属于白名单，黑名单下不应出现。
+	if strings.Contains(text, `"119.29.29.29"`) {
+		t.Errorf("黑名单模式不该出现「中国公共 DNS 直连」规则:\n%s", text)
+	}
+	if !hasNote(notes, "geoip.dat") {
+		t.Errorf("黑名单降级时缺少提示: %v", notes)
+	}
+}
+
+// TestBypassChinaDefaultsToWhitelistWhenAbsent 守住请求字段缺失时的默认值。
+//
+// 这是有意的选择：ArkTS 侧 AppSettings.bypassChina 的默认值是 true（绕过大陆），
+// 若请求里漏了这个字段就退化成黑名单，等于"用户以为在绕过大陆，实际不是"。
+// 因此 GenerateRequest.BypassChina 是 *bool，nil 按 true 处理。
+func TestBypassChinaDefaultsToWhitelistWhenAbsent(t *testing.T) {
+	svc := &config.Service{}
+	resp, err := svc.Generate(&config.GenerateRequest{
+		RoutingMode: "rule",
+		Extra:       arktsNodeJSON,
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if !strings.Contains(resp.ConfigJSON, "223.5.5.5") {
+		t.Errorf("缺省应走白名单（含中国公共 DNS 直连），实际:\n%s", resp.ConfigJSON)
+	}
+	if strings.Contains(resp.ConfigJSON, `"0-65535"`) {
+		t.Errorf("缺省应走白名单（无最终直连兜底），实际:\n%s", resp.ConfigJSON)
+	}
+
+	// 显式传 false 时必须真的切成黑名单
+	off := false
+	resp, err = svc.Generate(&config.GenerateRequest{
+		RoutingMode: "rule",
+		Extra:       arktsNodeJSON,
+		BypassChina: &off,
+	})
+	if err != nil {
+		t.Fatalf("Generate(off): %v", err)
+	}
+	if !strings.Contains(resp.ConfigJSON, `"0-65535"`) {
+		t.Errorf("显式传 bypassChina=false 应生成黑名单兜底规则:\n%s", resp.ConfigJSON)
+	}
+}
+
+// TestDNSIsSplitOnlyWithGeoAssets 守住 DNS 国内外分流。
+//
+// 这是"绕过大陆"的另一个必要条件：以前固定用 1.1.1.1 / 8.8.8.8，配合
+// domainStrategy=IPIfNonMatch，等于用国外 DNS 解析国内域名、再拿结果去匹配
+// geoip:cn —— 规则必然失配。
+func TestDNSIsSplitOnlyWithGeoAssets(t *testing.T) {
+	// 资源缺位：只能给纯国外 DNS，并明确告知降级
+	withoutGeo, notes := ruleWithMode(t, node("vmess"), true, false)
+	mustLoad(t, withoutGeo)
+	if strings.Contains(withoutGeo, "geosite:cn") {
+		t.Errorf("无 geo 资源时不该在 DNS 里写 geosite:cn（内核会拒绝）:\n%s", withoutGeo)
+	}
+	if !strings.Contains(withoutGeo, "1.1.1.1") ||
+		!strings.Contains(withoutGeo, "https://dns.google/dns-query") {
+		t.Errorf("缺少兜底解析器:\n%s", withoutGeo)
+	}
+	if !hasNote(notes, "dns:") {
+		t.Errorf("DNS 降级时缺少提示: %v", notes)
+	}
+
+	// 资源就位：应该出现「国内域名 -> 国内 DNS（expectIPs 约束）」这条定向解析器
+	withGeo, notes := ruleWithMode(t, node("vmess"), true, true)
+	if !strings.Contains(withGeo, `"geosite:cn"`) || !strings.Contains(withGeo, `"geoip:cn"`) {
+		t.Errorf("有 geo 资源时 DNS 应做国内外分流:\n%s", withGeo)
+	}
+	if !strings.Contains(withGeo, `"223.5.5.5"`) {
+		t.Errorf("DNS 分流缺少国内解析器 223.5.5.5:\n%s", withGeo)
+	}
+	if !strings.Contains(withGeo, `"expectIPs"`) || !strings.Contains(withGeo, `"skipFallback"`) {
+		t.Errorf("DNS 分流缺少 expectIPs / skipFallback 约束:\n%s", withGeo)
+	}
+	// DoH 域名必须有静态 hosts，否则解析 dns.google 本身就是引导环
+	if !strings.Contains(withGeo, `"dns.google"`) {
+		t.Errorf("DNS 缺少 hosts 引导映射:\n%s", withGeo)
+	}
+	if hasNote(notes, "geoip.dat") {
+		t.Errorf("资源就位时不该出现降级提示: %v", notes)
+	}
+}
+
+// TestGeoEnabledConfigFailsWithoutGeoFiles 是本文件里最重要的一条负向断言：
+// 它证明 Options.GeoAssets 这个开关是**载重**的，而不是保守起见。
+//
+// 生成 GeoAssets=true 的配置（含 geoip:/geosite:）后直接交给内核 loader，
+// 本地没有 geoip.dat / geosite.dat，装载**必须失败**。若哪天它突然通过了，
+// 说明 hasGeoAssets 的探测逻辑或 geo 规则已经名不副实，需要重新审视。
+func TestGeoEnabledConfigFailsWithoutGeoFiles(t *testing.T) {
+	text, _ := ruleWithMode(t, node("vmess"), true, true)
+	if !strings.Contains(text, "geoip:private") && !strings.Contains(text, "geoip:cn") {
+		t.Fatalf("GeoAssets=true 的配置里竟然没有 geoip: 规则，这个测试失去意义:\n%s", text)
+	}
+	_, err := xcore.LoadConfig("json", bytes.NewReader([]byte(text)))
+	if err == nil {
+		t.Fatal("含 geoip:/geosite: 的配置在没有 .dat 文件的目录下竟然加载成功；" +
+			"要么本机真的存在 geoip.dat，要么 GeoAssets 的设计前提已经不成立")
+	}
+	if !strings.Contains(err.Error(), "geoip.dat") && !strings.Contains(err.Error(), "geosite.dat") {
+		t.Fatalf("期望错误里提到 geoip.dat / geosite.dat，实际: %v", err)
+	}
+}
+
 // TestGeoRulesWhenAssetsPresent 覆盖"资源补齐后"的分支。
 //
 // 注意这里**不做** mustLoad：装了 geoip:/geosite: 规则之后内核会去打开真实的

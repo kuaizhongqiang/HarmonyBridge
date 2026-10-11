@@ -337,6 +337,19 @@ export const CoreAvailable: () => string;
   `echConfigList`（`ech`）/ `disableSystemRoot` / `certificates`，字段集对齐 v2rayN 的
   `Models/CoreConfigs/V2rayConfig.cs:342-346`。
 
+**(c) 路由分组里新增「分流资源」一行，且「绕过大陆」开关从空开关变成真生效。**
+同一批改动（详见 [`core.md`](core.md) §7.4.5.2）：
+
+- 设置页 · 路由 下新增 `settings_geo_assets` 一行：显示 `geoip.dat` / `geosite.dat`
+  是否就位与体积，点击即从 `Loyalsoldier/v2ray-rules-dat` 下载（与 v2rayN 的
+  `Global.GeoUrl` 同源）到 `<filesDir>/assets`。之所以把这件事前置到 UI：
+  资源缺失时 rule 模式会**静默降级**成"私有网段直连 + 其余走代理"，
+  只在 `notes` 里留一句话 —— 这是最难排查的那类问题。
+- `settings_bypass_cn`（中国大陆域名/IP 直连）这个开关此前**完全无效**：
+  `AppSettings.bypassChina` 从没被传进 `generateConfig`。现在它决定 rule 模式
+  走白名单（大陆直连、其余走代理）还是黑名单（已知被墙走代理、其余直连），
+  对应 v2rayN 的两份预设路由。缺省 `true`（与 `defaultSettings()` 一致）。
+
 > 注意 `pinnedPeerCertSha256` 的内核约束：逗号分隔的每一项必须是 32 字节（64 位十六进制）
 > sha256，长度不对整份配置会被拒（`transport_internet.go:717-733`）。我们不做前置校验，
 > 靠生成后的 `xcore.LoadConfig` 自检把内核的原话回传（🧪 已在 `config_test.go` 里用反向断言固化）。
@@ -369,9 +382,18 @@ export const CoreAvailable: () => string;
 → `32 executed`，产出 2.4 MB 未签名 HAP，`BUILD SUCCESSFUL`）；原生侧 `go build` / `go vet` /
 `go test` 通过（🧪）。
 
-§5.6 这两处修正之后又验过一次（🧪 同日）：`CompileArkTS` **实际执行** 7.29s（不是 `UP-TO-DATE`）
+§5.6 这几处修正之后又验过一次（🧪 同日）：`CompileArkTS` **实际执行** 7.29s（不是 `UP-TO-DATE`）
 → `BUILD SUCCESSFUL`，`19 executed / 14 up-to-date`；`go build` / `go vet` / `go test ./...` 全绿，
 其中新增的 `TestTlsReplacementFieldsReachStreamSettings` 与 `TestTlsCertificatesJSONIsValidated`
 都带**反向断言**（长度非法的 `pcs`、非数组的 `certificates` 必须被拒），避免测试变成空转。
 
-**两侧均未在真机上运行过。**
+(2) 的 (c) 之后又验过一次（🧪 同日）：`CompileArkTS` 实际执行 4.28s → `BUILD SUCCESSFUL`
+（`33 tasks in total: 19 executed, 14 up-to-date`）；`go build` / `go vet` / `go test ./...` 全绿，
+新增的 `TestBypassChinaWhitelistRules` / `TestBlacklistRulesWhenBypassChinaOff` /
+`TestBypassChinaDefaultsToWhitelistWhenAbsent` / `TestDNSIsSplitOnlyWithGeoAssets` /
+`TestGeoEnabledConfigFailsWithoutGeoFiles` 都通过，最后一条是**负向断言**
+（含 `geoip:`/`geosite:` 的配置在没有 `.dat` 的目录下必须加载失败），
+用来证明 `Options.GeoAssets` 这个开关是载重的而不是保守起见。
+
+**两侧均未在真机上运行过**，上述全部只是"能编译 + 内核 loader 接受这份配置"，
+没有任何一条跑过真实流量；下载分流资源这一步同样**未在真机验证**。

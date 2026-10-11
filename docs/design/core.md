@@ -542,6 +542,50 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
      `TestTlsCertificatesJSONIsValidated`，两者都带反向断言。
    UI 侧说明见 [`ui.md`](ui.md) §5.6。
 
+   5.2（2026-10-11 后续）**「绕过大陆」从"只是开关"变成真的会分流。**
+   审计发现它此前**完全不成立**，有三条独立原因，都已修：
+
+   - **`bypassChina` 是空开关**：`AppSettings.bypassChina` 存在、设置页有开关，
+     但 `ConnectionViewModel.connect()` 调 `generateConfig` 时没传，
+     `GenerateRequest` 里也没有这个字段 —— 拨动开关行为完全不变。现在贯通
+     ArkTS → 契约 → `Options.BypassChina`，并按 v2rayN 的两份预设分成
+     **白名单**（`custom_routing_white`：大陆直连、其余走代理）与
+     **黑名单**（`custom_routing_black`：已知被墙走代理、其余直连）。
+     静态数据（中国/海外公共 DNS 的 IP 与域名、私有网段、bittorrent 兜底）
+     集中放在 `service/config/rules_data.go`，逐条标注了上游出处行号。
+
+   - **DNS 没有国内外分流，而且 DNS 全走代理**：原先固定 `1.1.1.1 / 8.8.8.8`，
+     rule 模式里还有一条 `port 53 → proxy`。配合 `domainStrategy=IPIfNonMatch`
+     （域名先解析成 IP 再匹配 `geoip:cn`），等于**用国外 DNS 解析国内域名、
+     再拿结果去匹配 `geoip:cn`** —— 规则必然失配。现在按
+     `Sample/dns_v2ray_normal` 生成：`geosite:cn → 223.5.5.5 + expectIPs geoip:cn`、
+     `geosite:google → 1.1.1.1`（`skipFallback`），并用 `hosts` 给 DoH 域名做静态
+     映射避免引导环；`dns.tag = dns-module` 让 routing 能只对 DNS 查询定向。
+     国内 DNS 之所以仍能直连，是因为白名单里的「中国公共 DNS IP/域名直连」
+     规则排在 DNS 规则**之前**（内核取首个命中，顺序有意义）。
+
+   - **geo 资源一个都没有**：`entry/src/main/resources/rawfile/` 是空的，
+     全仓库没有任何 `.dat`，`hasGeoAssets` 恒为 false，`geosite:cn` / `geoip:cn`
+     从未进入配置。落地方案是**按需下载**（与 v2rayN 的 `Global.GeoUrl` 同源：
+     `Loyalsoldier/v2ray-rules-dat`），而不是把约 15 MB 资源塞进 HAP：
+     新增 `service/GeoAssetService.ets`（探测 / 下载 / 删除，写 `.part` 再改名，
+     避免半截文件被当成"已就位"），设置页路由分组下新增一行状态 + 点击下载。
+     资源目录仍然只有 `<filesDir>/assets` 一处定义（`ConfigStore.assetsDirPath`），
+     它同时喂给 `ConfigService.Generate` 的 `assetDir` 与 `CoreService.Start` 的
+     `assetLocation`。
+
+   顺带对齐了 v2rayN 对 TUN 入站的处理：`sniffing.routeOnly = true`，
+   嗅探出的域名只用于路由匹配、不改写实际目的地（`V2rayInboundService.cs:90`）。
+   另注：本版内核的嗅探器是**内建**的（`app/dispatcher/sniffer.go:39-44` 固定注册
+   http/tls/bittorrent/quic/utp），因此黑名单的 `protocol: ["bittorrent"]` 规则
+   确实会生效；而 `destOverride` **不能**写 bittorrent ——
+   `infra/conf/xray.go:75-86` 只接受 http/tls/quic/fakedns。
+
+   **仍未验证**：以上全是配置语义层面的改动，`go test` 只能证明"内核 loader 接受
+   这份配置"，**没有任何一条在真机上跑过流量**，所以"大陆域名确实直连了"
+   依旧属于 ❓ 而非 ✅。资源就位后的分支更是连 loader 都过不了
+   （本地没有 `.dat`），只有一条负向断言守着它（见下）。
+
 ## 8. 测试与验收
 
 宿主侧（已具备）：

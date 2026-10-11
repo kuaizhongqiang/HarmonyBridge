@@ -24,6 +24,7 @@ import {
 } from '../constants/Common';
 import { Logger } from '../utils/Logger';
 import { ConfigStore, CorePaths } from './ConfigStore';
+import { GeoAssetService, GeoAssetStatus } from '../service/GeoAssetService';
 
 const TAG: string = 'Bridge';
 
@@ -297,11 +298,18 @@ class MockBridgeImpl implements IBridge {
     if (service === BridgeService.GENERATE_CONFIG) {
       // MOCK 故意不返回 configJson：Bridge 只在拿到配置文本时才落盘，
       // 这样在预览器里点"连接"不会产生任何文件系统副作用。
+      //
+      // 但 geoAssets 必须报**真实探测结果**：Mock 模式下用户仍然可以在设置页
+      // 下载分流资源，如果这里恒为 false，UI 会永远显示"资源缺失"，
+      // 与用户在设置页看到的下载成功自相矛盾。
+      const assetDirValue: Object | undefined = params['assetDir'];
+      const assetDir: string = typeof assetDirValue === 'string' ? assetDirValue as string : '';
+      const geoStatus: GeoAssetStatus = GeoAssetService.statusOf(assetDir);
       const result: ConfigPathResult = {
         configPath: '/data/storage/el2/base/haps/entry/files/core/config.json',
-        assetPath: '/data/storage/el2/base/haps/entry/files/assets',
+        assetPath: assetDir,
         notes: [],
-        geoAssets: false
+        geoAssets: geoStatus.present
       };
       return success(result);
     }
@@ -393,6 +401,11 @@ export class Bridge {
    *     loader，从而在生成本身就完成一次自检；
    *   * **落盘**在这里：沙箱布局（filesDir）只有 ArkTS 知道，原生侧不应该知道。
    *
+   * @param bypassChina 是否「绕过大陆」（`AppSettings.bypassChina`）。**只在
+   *                    routingMode=rule 时有意义**：true = 白名单（大陆直连、
+   *                    其余走代理），false = 黑名单（已知被墙走代理、其余直连），
+   *                    对应 v2rayN 的两份预设路由。此前这个开关在 UI 上存在
+   *                    但从未传到这里，拨动时不产生任何行为差异。
    * @param paths CorePaths（filesDir + assetDir）。assetDir 会被传给原生用于
    *              探测 geoip.dat / geosite.dat 是否就位 —— 缺文件时内核会
    *              拒绝含 geoip:/geosite: 规则的**整份**配置，不是忽略那一条。
@@ -400,12 +413,14 @@ export class Bridge {
   static async generateConfig(
     nodeId: string,
     routingMode: string,
+    bypassChina: boolean,
     extra: string,
     paths: CorePaths
   ): Promise<ConfigPathResult> {
     const params: Record<string, Object> = {
       'nodeId': nodeId,
       'routingMode': routingMode,
+      'bypassChina': bypassChina,
       'extra': extra,
       'assetDir': paths.assetDir
     };

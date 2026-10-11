@@ -5,7 +5,7 @@
  *   DNS 与嗅探、分应用代理（trusted/blocked applications）、日志、关于。
  * 所有改动都直接写回 SettingsViewModel，跨页面共享。
  */
-import { bundleManager } from '@kit.AbilityKit';
+import { bundleManager, common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { AppProxyMode, LogLevel, RoutingMode } from '../model/Types';
 import { settingsViewModel, SettingsViewModel } from '../viewmodel/SettingsViewModel';
@@ -22,6 +22,7 @@ import { SettingGroupTitle, SettingSwitchRow, SettingTextRow, SettingValueRow } 
 import { OptionPickerDialog, PickerKind } from '../components/OptionPickerDialog';
 import { stringOf } from '../utils/TextFormat';
 import { resourceManager } from '@kit.LocalizationKit';
+import { GeoAssetService, GeoAssetStatus, GeoDownloadResult } from '../service/GeoAssetService';
 
 @Entry
 @ComponentV2
@@ -32,6 +33,10 @@ struct SettingsPage {
   @Local pickerKind: string = PickerKind.ROUTING;
   /** 选择项文案（在 aboutToAppear 里按当前语言求值一次；语言运行中变更会重建页面） */
   @Local pickerLabels: string[] = [];
+  /** 分流资源（geoip.dat / geosite.dat）的状态文案 */
+  @Local geoAssetText: string = '';
+  /** 是否正在下载分流资源（防重复触发） */
+  @Local geoBusy: boolean = false;
 
   private pickerController: CustomDialogController = new CustomDialogController({
     builder: OptionPickerDialog({
@@ -51,6 +56,74 @@ struct SettingsPage {
     this.vm.init();
     this.loadAppVersion();
     this.loadPickerLabels();
+    this.refreshGeoAssets();
+  }
+
+  // ---------------------- 分流资源（geoip.dat / geosite.dat） ----------------------
+
+  /** 应用沙箱的 filesDir；拿不到 context 时返回空串（此时不做任何文件操作） */
+  private filesDir(): string {
+    const context: common.Context | undefined = this.getUIContext().getHostContext();
+    if (context === undefined) {
+      return '';
+    }
+    return context.filesDir;
+  }
+
+  /**
+   * 刷新分流资源状态。
+   *
+   * 这件事必须让用户看得见：资源缺失时 rule 模式的「绕过大陆」会**降级**
+   * （生成器只给"私有网段直连 + 其余走代理"，并在 notes 里说明），
+   * 而不是报错 —— 静默降级正是最难排查的那类问题。
+   */
+  private refreshGeoAssets(): void {
+    const status: GeoAssetStatus = GeoAssetService.status(this.filesDir());
+    if (status.present) {
+      this.geoAssetText = this.text('settings_geo_state_ready') + '  ' +
+        GeoAssetService.formatBytes(status.geoip.bytes) + ' / ' +
+        GeoAssetService.formatBytes(status.geosite.bytes);
+    } else {
+      this.geoAssetText = this.text('settings_geo_state_missing');
+    }
+  }
+
+  /** 下载（或重新下载）分流资源 */
+  private async downloadGeoAssets(): Promise<void> {
+    if (this.geoBusy) {
+      return;
+    }
+    const dir: string = this.filesDir();
+    if (dir.length === 0) {
+      logViewModel.append(LogLevel.WARN, 'SettingsPage', 'geo download skipped: no filesDir');
+      return;
+    }
+    this.geoBusy = true;
+    this.geoAssetText = this.text('settings_geo_downloading');
+    try {
+      const result: GeoDownloadResult = await GeoAssetService.download(
+        dir,
+        (name: string, received: number, total: number) => {
+          this.geoAssetText = this.text('settings_geo_downloading') + ' ' + name + ' ' +
+            GeoAssetService.formatBytes(received) + ' / ' + GeoAssetService.formatBytes(total);
+        }
+      );
+      if (result.ok) {
+        logViewModel.append(LogLevel.INFO, 'SettingsPage', 'geo assets downloaded');
+      } else {
+        this.geoAssetText = this.text('settings_geo_download_failed');
+        logViewModel.append(LogLevel.ERROR, 'SettingsPage', 'geo download failed: ' + result.error);
+        return;
+      }
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      this.geoAssetText = this.text('settings_geo_download_failed');
+      logViewModel.append(LogLevel.ERROR, 'SettingsPage', 'geo download threw: ' + err.message);
+      return;
+    } finally {
+      this.geoBusy = false;
+    }
+    this.refreshGeoAssets();
   }
 
   /** 预取三类选择器的文案（顺序与对话框内的枚举顺序一致） */
@@ -217,6 +290,21 @@ struct SettingsPage {
                 this.vm.setBypassChina(value);
               }
             })
+            Divider().color(Theme.divider)
+            // 「绕过大陆」能不能真的按国家/地区分流，取决于这两份数据在不在
+            // <filesDir>/assets 里；缺失时生成器会降级并给出 note，这里把它前置暴露。
+            SettingValueRow({
+              title: $r('app.string.settings_geo_assets'),
+              value: this.geoAssetText,
+              onTap: () => {
+                this.downloadGeoAssets();
+              }
+            })
+            Text($r('app.string.settings_geo_hint'))
+              .fontSize(FontSizes.caption)
+              .fontColor(Theme.textSecondary)
+              .width('100%')
+              .padding({ bottom: Dimens.item })
             Divider().color(Theme.divider)
             SettingSwitchRow({
               title: $r('app.string.settings_custom_rules'),

@@ -174,6 +174,15 @@ ArkTS 页面
 - 虚拟网卡接口名实测为 **`vpn-tun`**。
 - `ASSET_LOCATION` 指向 `resourceDir`（放 `geoip.dat` / `geosite.dat`），`CONFIG_LOCATION` 指向应用 files 目录下的 `config.json`。
 
+> **本项目的取舍（与上面这条参考实现不同，已落地）**：`assetLocation` 用
+> **`<filesDir>/assets`**，而不是只读的 `resourceDir`。理由：geo 资源改为**按需下载**
+> 而不是打进 HAP，只有可写目录才放得下。路径的唯一来源是
+> `entry/src/main/ets/core/ConfigStore.ets#assetsDirPath`，它同时喂给
+> `ConfigService.Generate` 的 `assetDir`（探测资源是否就位）与 `CoreService.Start` 的
+> `assetLocation`（原生侧把它 export 成 `xray.location.asset`，见
+> `golang/service/core/core.go:135-143`）。两处若拼出不同路径，症状是"下载了但内核说找不到"。
+> 见 [`docs/design/core.md`](docs/design/core.md) §7.4.5.2。
+
 ---
 
 ## 3. 硬约束（违反即为缺陷）
@@ -355,7 +364,7 @@ Conventional Commits，由 `.githooks/commit-msg` 强制：
 | VPN 扩展进程被系统回收 | 断流 | 前台常驻通知 + 断线重连状态机 |
 | 回环（代理流量又进 VPN） | 直接断网 | **必须**对出站 socket 调 `protect(fd)`；这是 xray tun 入站的硬要求 |
 | 用户授权被拒 / 用户类型受限 | 无法建 VPN | 处理 `2203001` 与 `onAuthorizationResult`，给出可理解的提示 |
-| geoip/geosite ~30 MB | 体积与 LFS 管理 | LFS 托管；或改为按需下载 |
+| geoip/geosite 体积 | HAP 膨胀 | **已裁决：按需下载**（不打包）。落点 `<filesDir>/assets`，来源与 v2rayN 同源（`Global.GeoUrl` → Loyalsoldier/v2ray-rules-dat）。实现见 `ets/service/GeoAssetService.ets`；缺失时生成器会降级并在 `notes` 里说明。**注意这条尚未在真机验证过下载** |
 
 ---
 
