@@ -43,12 +43,20 @@ Go 标准库里的 `socklen_t` 与 OHOS musl 的 `typedef unsigned socklen_t` �
 
 **怎么解**：在 Linux / WSL 上构建（脚本已按这条路写）。
 
+> 👉 **完整的换机执行说明已单独成文**：[`docs/04-Linux构建任务书.md`](docs/04-Linux构建任务书.md)
+> —— 环境准备、两个必须解决的障碍（`android/log.h` shim、`socklen_t` 补丁）、
+> TLS 验收检查、报告模板都在那里。**这一节只记状态，操作步骤看那份。**
+
 **当前状态**：本机（Windows）依然走不通。**这是最靠前的工程任务，因为它不需要真机。**
 
 > ⚠️ **本轮新增的实测结论**：本机**连 WSL 都没装**（`wsl --status` 返回
 > "未安装用于 Linux 的 Windows 子系统"），也没有 Docker。所以"在 Linux 上编"
 > 这条路**本机当前一步都走不了** —— 先得装 WSL + 一个发行版，或者另找一台 Linux 机器。
 > 这一点此前没有被记录过，导致"解 1.1"看起来比实际更容易。
+>
+> ✅ **同时澄清了两个被过度担心的点**（2026-10-11 核实上游仓库）：
+> `socklen_t` 冲突与 Windows 无关，**Linux 上依然存在**（头文件约定冲突）；
+> 但"NDK 路径含空格"和"8.3 短名"这些纯 Windows 麻烦在 Linux 上会消失。
 
 ---
 
@@ -70,17 +78,24 @@ tun2socks 能否接管 fd、分流规则是否真的生效。本机 SDK 也没�
 **位置**：`scripts/build-tun2socks.ps1` / `.sh`
 
 **现象**：配方是按上游 Makefile + 本机 NDK 布局**推出来**的，从未执行成功。
-脚本头部已如实列出三个已知风险点：
 
-1. 上游的源文件列表来自 `build.mk`（`-include build.mk`），它是否随仓库提供**未确认**；
-2. 构建会递归进 `third-part/{yaml,lwip,hev-task-system}`，**`lwip` 能否交叉到 OHOS musl 未知**；
-3. 上游 `CCFLAGS` 默认带 `-Werror`，交叉编译的告警会变成硬失败（脚本已加 `-Wno-error` 缓解）。
+> ✅ **两个原来的"未确认"已核实（2026-10-11，查上游仓库 `heiher/hev-socks5-tunnel` 2.18.0）**：
+> 1. **上游确实提供 `build.mk`**（仓库根目录），且 `SRCFILES=$(call rwildcard,$(SRCDIR)/,*.c *.S)`
+>    —— 所以"配方推错、SRCFILES 为空"这个担心**不成立**；
+> 2. `src/` 下**确实有 .c 源码**（`hev-main.c` / `hev-socks5-tunnel.c` / `hev-tunnel-linux.c` …），
+>    不是空壳；许可证是 **MIT**，与我们的边界兼容。
+>
+> ❓ **仍未验证**：`third-part/{lwip,yaml,hev-task-system}` 能否交叉到 OHOS musl；
+> 上游 `-Werror` 会不会把交叉编译的告警变成硬失败（脚本已加 `-Wno-error`）。
+> ⚠️ 另有一个结构细节：`.gitmodules` 里除了三个 `third-part/*` 还有 **`src/core`**，
+> 脚本用 `git clone --recursive`，需确认嵌套 submodule 真的拉下来了。
 
 **为什么挡住目标**：这是数据面的实现本体。没有它，`Tun2socksStart` 只能返回
 `libhevsocks5tun.so is not available: …`。
 
 **怎么解**：在 Linux 上跑 `bash scripts/build-tun2socks.sh <ndk>`（同样受 §1.1 的
 WSL 未安装制约）。**如果失败，如实记录失败点**——那份记录本身就是本条的交付物，不要绕过。
+操作细节见 [`docs/04-Linux构建任务书.md`](docs/04-Linux构建任务书.md) §7。
 
 ---
 
