@@ -91,7 +91,7 @@ go version
 **不要**用发行版仓库里过旧的 Go。
 
 > ⚠️ **一个重要分岔**：`go.mod` 写的是 `go 1.26` / `toolchain go1.26.4`。
-> 但如果你最后决定走 §6.3 的 **B 路线（第三方 fork）**，那你用的**不是官方 Go**，
+> 但如果你最后决定走 §6.3 的 **B 路线（fork + `GOOS=openharmony`）**，那你用的**不是官方 Go**，
 > 而是一个 `GOOS=openharmony` 的 fork。详见 §6.3。
 
 ### 2.4 其他工具
@@ -166,7 +166,10 @@ as _Ctype_socklen_t value in argument to _C2func_getnameinfo
 
 **把这两条的真实原文（不要润色、不要省略路径）记进报告。** 这是交付物的一部分。
 
-### 4.2 两个必须解决的问题（脚本没有帮你解决，需要你动手）
+### 4.2 A 路线下必须解决的两个障碍（脚本没有帮你解决，需要你动手）
+
+> 📌 下面两个障碍**只存在于 A 路线**（`GOOS=android`）。走 B 路线（fork +
+> `GOOS=openharmony`）时，两个都不会出现 —— 见 §6.3。
 
 #### 问题 A：OHOS sysroot 里没有 `android/log.h`（可绕过）
 
@@ -203,7 +206,7 @@ static inline void __android_log_vprint(int prio, const char *tag, const char *f
 
 cgo 生成的调用因此类型不匹配。**这不是加编译选项能解决的**，二选一：
 
-**A 路线（改动最小、保留官方 Go）**：给 Go 标准库打一个强制转换补丁。
+**A1 方案（改动最小、保留官方 Go）**：给 Go 标准库打一个强制转换补丁。
 
 ```bash
 # 找到 Go 的源码目录
@@ -214,16 +217,19 @@ GOROOT="$(go env GOROOT)"
 
 建议做成**可复现的补丁文件**（`*.patch`）并交出，而不是手工改 `GOROOT` 就算了。
 
-**B 路线（不动 Go，做头文件覆盖层）**：提供一份让 `socklen_t` 与 bionic 同宽的
+**A2 方案（不动 Go，做头文件覆盖层）**：提供一份让 `socklen_t` 与 bionic 同宽的
 `bits/alltypes.h` 覆盖层，经 `-I` 或 `--sysroot` 顺序注入。
 
-> ❓ **B 路线我尚未验证**，只提出假设。难点：`socklen_t` 定义在
+> ❓ **A2 方案我尚未验证**，只提出假设。难点：`socklen_t` 定义在
 > `bits/alltypes.h`，而该头被**大量**系统头包含，遮蔽它的连带影响必须实测。
-> 若你走 B，请特别记录"有没有别的类型因此报错"。
+> 若你走 A2，请特别记录"有没有别的类型因此报错"。
+>
+> 👉 **命名约定（全文统一）**：**A = 官方 Go + `GOOS=android`**（A1 打 stdlib 补丁 /
+> A2 用头文件覆盖层）；**B = fork + `GOOS=openharmony`**。
 
 ### 4.3 你还有第三个选择：换工具链（见 §6.3 的 B 路线）
 
-如果 A/B 都卡住，或者你更看重**运行期可靠性**，可以改用 `GOOS=openharmony` 的
+如果 A1/A2 都卡住，或者你更看重**运行期可靠性**，可以改用 `GOOS=openharmony` 的
 **第三方 Go fork**。这不是"绕过去"，而是换一条**证据更强**的路 —— 详见 §6.3 与
 [`research/02-核心移植方案.md`](research/02-核心移植方案.md) §7。
 
@@ -258,30 +264,44 @@ file libcore.so
 
 | # | 坑 | 状态 | 对你的影响 |
 | --- | --- | --- | --- |
-| 1 | Go 官方**没有** `GOOS=ohos` | ✅ 已证实，无法绕过 | 所以用 `GOOS=android` 借道，这是社区做法**不是官方支持** |
+| 1 | Go 官方**没有** `GOOS=ohos` | ✅ 已证实 | 官方 Go 只能 `GOOS=android` 借道（**不是官方支持**）；或用 §6.3 的 fork 走真正的 `GOOS=openharmony` |
 | 2 | `-D__MUSL__` 是承重墙 | ✅ 已证实 | 漏了**不会编译报错**，而是**运行期崩溃**。脚本已带 |
 | 3 | NDK 路径含空格 → cgo 截断 `CC` | 🧪 实测（Windows 上致命） | Linux 上同样会坏（`$CFLAGS` 展开），**放无空格路径** |
-| 4 | sysroot 无 `android/log.h` | 🧪 已核实 | 见 §4.2 问题 A，可绕过 |
-| 5 | `socklen_t` 类型冲突 | 🧪 已核实 | 见 §4.2 问题 B，**拦路石** |
+| 4 | sysroot 无 `android/log.h` | 🧪 已核实 | **只影响 `GOOS=android`（A 路线）**；见 §4.2 问题 A |
+| 5 | `socklen_t` 类型冲突 | 🧪 已核实 | **也只影响 A 路线**；见 §4.2 问题 B。走 B 路线则不存在 |
 
 **已经排除的**：Windows 上那个"8.3 短名救不了"的
 附加麻烦在 Linux 上不存在。交叉编译能力本身**没问题** ——
 🧪 本机实测 `clang --target=aarch64-linux-ohos` 能产出 ELF64 AArch64 目标文件
 （`docs/design/core.md:334`）。失败**只**发生在 Go 的 cgo 生成代码里。
 
-### 6.2 `GOOS=android` 的三个代价（必须知道，不能假装没有）
+> 🧭 **先读 §6.3 再决定走 A 还是 B**。第 4、5 两个坑**只属于 A 路线**，
+> 而 B 路线（fork + `GOOS=openharmony`）在 2026-10-11 已被查实**同时绕开它们**。
+
+### 6.2 `GOOS=android`（A 路线）的三个代价（必须知道，不能假装没有）
 
 1. Go runtime 编入 **android 分支**（`runtime/internal`、网络栈行为差异）；
 2. `proxy/tun` 选中 **android 后端**而非 linux 后端；
 3. **TLS 假设是按 Android bionic 写的** —— 见下条。
 
-### 6.3 ⚠️ 头号风险：这是"能编" ≠ "真机不崩"的那条线
+**这三条都是"选 A 路线才要付"的代价**。B 路线没有这三条。
 
-`GOOS=android` 借的是**为 bionic 写的 TLS 假设**（固定 TLS 槽）。OHOS 用 musl +
-`R_AARCH64_TLSDESC`。🌐 有公开记录：**外来线程（ArkTS / VPN 扩展进程）调 cgo 时
-概率性 SIGSEGV**。
+### 6.3 ⚠️ 头号风险（A 路线的）："能编" ≠ "真机不崩"
 
-**所以 T1 的验收必须包含 TLS 检查**（这是本任务书最有价值的部分）：
+`GOOS=android` 借的是**为 bionic 写的 TLS 假设**（固定 TLS 槽，`tlsModel = "LE"` 一类）。
+OHOS 用 musl + `R_AARCH64_TLSDESC`。🌐 有公开记录：**外来线程（ArkTS / VPN 扩展进程）
+调 cgo 时概率性 SIGSEGV**。
+
+> ✅ **2026-10-11 更新：这条风险有一个已被证实的规避方式** ——
+> 走 **B 路线**（fork + `GOOS=openharmony`）时，Go 工具链会把 arm64 的
+> `tlsModel` 设成 **`GD`**（广义动态），**正是为避开固定槽假设**。
+> 证据是 fork 的 `src/cmd/go/internal/work/init.go` 里 `c-shared` 分支的
+> `case "arm64": tlsModel = "GD"`。详见 §6.3 末尾的 **B 路线**。
+>
+> 所以：**如果你打算认真做这件事，B 路线值得优先评估**；A 路线依然可行，
+> 但要接受上面这条未消除的风险，并用下面的 TLS 检查留下证据。
+
+**无论走哪条，T1 的验收都必须包含 TLS 检查**（这是本任务书最有价值的部分）：
 
 ```bash
 # 1) 程序头里有没有 TLS 段？
@@ -301,28 +321,75 @@ file libcore.so
 - 看到 `GoInvoke` 与 `GoFreeCString` 都是 `T`（定义在本库、全局）→ 导出正确。
 - **无论结果如何都如实记录原始输出** —— 这份记录本身就是下一步的输入。
 
-**如果 TLS 检查结果不乐观，或你在真机前就想降低风险**，那就要考虑下面这条路线：
+**如果 TLS 检查结果不乐观，或你想从一开始就走证据更强的那条路**，见下面这条路线。
 
-#### B 路线：改用 `GOOS=openharmony` 的第三方 Go fork
+#### ⭐ B 路线：`GOOS=openharmony` 的 Go fork（**推荐优先评估**）
 
-🌐 依据（详见 [`research/02-核心移植方案.md`](research/02-核心移植方案.md) §7）：
+> 🧪 **2026-10-11 已查实（直接读 fork 源码，非论坛传闻）**：这条路**可行**，
+> 而且它**从根上消除了上面那条 TLS 头号风险**。下面是逐条证据。
+
+**候选工具链**：
 
 | 方案 | 版本能力 | 评价 |
 | --- | --- | --- |
-| 官方 OpenHarmony SIG fork | 封顶 **go1.24.5** | ❌ **编不动**本项目的 xray-core（要求 go1.26） |
-| 🌐 `star4277/ohos-go` | **v1.26.5-beta1** | 事实上的可用工具链，但**是个人 fork（star 数极低）** |
+| 官方 OpenHarmony SIG fork | 封顶 **go1.24.5** | ❌ **编不动**本项目的 xray-core（`go.mod` 要求 go1.26） |
+| `star4277/ohos-go` | **v1.26.5-beta1**（2026-07-31） | ✅ 唯一可用；BSD-3-Clause；但**star 4 / fork 0**，是个人仓库 |
 
-⚠️ **两个必须写进报告的风险**：
+**证实的四条（🧪 全部来自 fork 源码，tag `v1.26.5-beta1`）**：
 
-1. **供应链风险**：现役可用工具链是个人 fork。用不用**需要人来拍板**，
-   不该由执行者默默决定。
-2. **`-buildmode=c-shared` 在 openharmony 目标上是否支持未证实** ——
-   🌐 有论坛标题称不支持（未抓取正文，❓）。**若你要走 B，请先验证这一条**，
-   否则可能白忙。
+1. **`-buildmode=c-shared` 明确支持 `openharmony/arm64`。**
+   `src/internal/platform/supported.go` 的 `c-shared` 分支里带
+   `"openharmony/arm64", "openharmony/amd64"`，且 `distInfo` 认得这个平台。
+   👉 **此前"论坛称不支持"的说法到此证伪**（原帖正文从未抓到，现已不必纠结）。
 
-> 📌 **建议**：**先走 A 路线（官方 Go + 补丁）把 `libcore.so` 编出来**，
-> 拿到 TLS 检查的真实数据；然后由项目负责人**基于数据**决定是否换 B 路线。
-> 不要一上手就引入第三方工具链 —— 那会把"能不能编"和"该不该用"两件事混在一起。
+2. **cgo 的 c-shared 路径对 openharmony 有专门处理，并且选了正确的 TLS 模型。**
+   `src/cmd/go/internal/work/init.go` 的 `c-shared` 分支：
+
+   ```go
+   case "linux", "android", "freebsd", "openharmony":
+       codegenArg = "-shared"
+       switch cfg.Goarch {
+       case "arm64":
+           tlsModel = "GD"        // ← 广义动态 TLS，不是固定槽
+       ...
+   ```
+
+   **`tlsModel = "GD"` 是关键**：它避开了 bionic 那套"固定 TLS 槽"假设 ——
+   也就是 §6.3 里那条"外来线程调 cgo 概率性 SIGSEGV"的根源。
+
+3. **`GOOS=openharmony` 是被正式识别的一等目标**，不是一个 hack：
+   `src/internal/syslist/syslist.go` 里有 `"openharmony": true`，
+   `src/cmd/dist/build.go` 里有 `case "openharmony"` 与"default CC is clang"。
+
+4. **标准库有真实的 openharmony 移植**，不是只加了个字符串：
+   `src/runtime/rt0_openharmony_arm64.s`、`src/internal/goos/zgoos_openharmony.go`、
+   `src/net/interface_table_openharmony.go`、`src/mime/type_openharmony.go`、
+   `src/time/zoneinfo_openharmony.go`。
+
+**B 路线额外的好处（相对 A 路线）**：
+
+- ✅ **不再需要 `socklen_t` 补丁** —— 目标从 android 变成 openharmony 后，
+  不再拿 bionic 的头文件约定去撞 OHOS 的 musl 头（§4.2 问题 B 消失）。
+- ✅ **不再需要 `android/log.h` shim** —— 不再编 `gcc_android.c`（§4.2 问题 A 消失）。
+- ✅ **不再有 TLS 墙**（见上面第 2 条）。
+
+**B 路线仍要如实报告的风险**：
+
+1. **供应链风险（未变，仍需人拍板）**：可用工具链是**个人仓库**（star 4 / fork 0，
+   tag 停在 2026-07-31）。"能编"不等于"长期可维护"。
+   用不用**要项目负责人决定**，执行者不要默默引入。
+2. **beta 标签**：`v1.26.5-beta1` 是 beta。
+3. ❓ **OHOS NDK 的用法**：仍应让它用 **OHOS NDK 的 clang**（`CC`/`--sysroot` 指向 NDK），
+   不要让它落到宿主机 gcc。fork 虽然自带 openharmony 支持，**依赖仍然是我们自己的**
+   （xray-core + 那三个 OHOS 库），所以 `scripts/build-core.sh` 的环境变量**大体仍适用**，
+   只是把 `GOOS=android` 换成 `GOOS=openharmony`。**具体是否还需要 `-D__MUSL__`，
+   请以实际编译结果为准并记录。**
+
+> 📌 **给执行者的建议**：
+> 1. **两条路都试**（A 用官方 Go，B 用 fork）。两条路的产物都能给你 TLS 检查数据，
+>    而**对比数据本身就是最有价值的交付物**。
+> 2. 每条的结论按 §9 模板写清：**用了哪个工具链、编没编过、TLS 重定位类型是什么**。
+> 3. 最终选哪条**由项目负责人拍板** —— 你负责把决策所需的数据备齐。
 
 ---
 
@@ -391,7 +458,8 @@ hev_socks5_tunnel_stats
 - [ ] `llvm-nm -D --defined-only` 能看到 **`GoInvoke`** 与 **`GoFreeCString`**
 - [ ] **TLS 检查已做，原始输出已记录**（§6.3）—— 这是最重要的一条
 - [ ] `llvm-readelf -d` 里**没有**未解析的 `libohcommonevent` / `libhilog_ndk.z` / `libtime_service_ndk` 之外的意外依赖
-- [ ] 报告里写清：**用了 A 路线还是 B 路线**，以及具体改了什么
+- [ ] 报告里写清：**用了 A 还是 B（A 的话是 A1 还是 A2）**，以及具体改了什么
+- [ ] 若走了 B：记录 **Go fork 的仓库 + tag + commit sha**（可复现性）
 
 ### T2 · `libhevsocks5tun.so`
 
@@ -424,7 +492,8 @@ hev_socks5_tunnel_stats
 
 ## T1 · libcore.so
 - 结论：✅ 编出 / ❌ 未编出（**二选一，不许模糊**）
-- 走的路线：A（官方 Go + 补丁）/ B（fork）
+- 走的路线：A（官方 Go + `GOOS=android`；再注明 A1 补丁 / A2 覆盖层）/ B（fork + `GOOS=openharmony`）
+- 若走 B：fork 仓库 = ___，tag = ___，commit sha = ___
 - 关键报错原文（若失败，**原样粘贴**）：
   ```
   ...
