@@ -2,19 +2,25 @@
  * NodesPage.ets
  * 节点 / 服务器列表页。列定义对齐 v2rayN 的 ProfilesView：
  * 协议 / 别名 / 地址:端口 / 传输 / TLS / 延迟 / 测速。
- * 动作栏对齐 v2rayN：过滤、排序、测试延迟、快速测速（占位）。
+ * 动作栏对齐 v2rayN：过滤、排序、测试延迟、添加节点。
+ * 添加 / 编辑使用底部半屏 Sheet（components/NodeEditSheet.ets），字段集对齐 AddServerWindow。
  */
 import { nodeViewModel, NodeViewModel, NodeSortKey, SortDirection } from '../viewmodel/NodeViewModel';
+import { NodeEditForm } from '../viewmodel/NodeEditForm';
 import { ServerNode, nodeEndpointText } from '../model/ServerNode';
 import { NodeId, protocolTagText } from '../model/Types';
 import { Dimens, FontSizes, Radii } from '../constants/Dimens';
 import { Theme } from '../constants/Theme';
 import { Routes } from '../constants/Routes';
+import { SUBSCRIPTION_ID_MANUAL, SUBSCRIPTION_NAME_MANUAL } from '../constants/Common';
 import { PageHeader } from '../components/PageHeader';
 import { LatencyBadge, ProtocolTag } from '../components/LatencyBadge';
 import { EmptyState } from '../components/EmptyState';
 import { NavigationBar } from '../components/NavigationBar';
+import { NodeEditSheet } from '../components/NodeEditSheet';
+import { validateNode, ValidationResult } from '../service/NodeValidator';
 import { stringOf } from '../utils/TextFormat';
+import { Toast } from '../utils/Toast';
 
 @Entry
 @ComponentV2
@@ -22,9 +28,71 @@ struct NodesPage {
   @Local vm: NodeViewModel = nodeViewModel;
   @Local sortIndex: number = 0;
   @Local ascending: boolean = true;
+  /** Sheet 是否展开 */
+  @Local sheetShown: boolean = false;
+  /** 正在编辑的节点 id；空串 = 新增 */
+  @Local editingId: NodeId = '';
+  /** 表单状态（页面持有，Sheet 只读渲染） */
+  @Local editForm: NodeEditForm = new NodeEditForm();
+  /** 可选分组（订阅名），打开 Sheet 时快照一次 */
+  @Local groupOptions: string[] = [];
 
   aboutToAppear(): void {
     this.vm.init();
+  }
+
+  /** 打开「添加节点」表单 */
+  private openAddSheet(): void {
+    this.editingId = '';
+    this.groupOptions = this.vm.subscriptionNames();
+    this.editForm = NodeEditForm.fromNode(this.vm.createDraft());
+    this.sheetShown = true;
+  }
+
+  /** 打开「编辑节点」表单（NodeEditForm.fromNode 内部会克隆，未保存不污染列表） */
+  private openEditSheet(node: ServerNode): void {
+    this.editingId = node.id;
+    this.groupOptions = this.vm.subscriptionNames();
+    this.editForm = NodeEditForm.fromNode(node);
+    this.sheetShown = true;
+  }
+
+  /** 保存表单：校验通过才落库 */
+  private saveSheet(): void {
+    const groupName: string = this.editForm.groupName;
+    const isManual: boolean = groupName.length === 0;
+    const subscriptionId: string = isManual ? SUBSCRIPTION_ID_MANUAL : this.vm.subscriptionIdOfName(groupName);
+    const subscriptionName: string = isManual ? SUBSCRIPTION_NAME_MANUAL : groupName;
+    const node: ServerNode = this.editForm.toNode(subscriptionId, subscriptionName);
+    const validation: ValidationResult = validateNode(node);
+    if (!validation.valid) {
+      Toast.show(this.getUIContext().getPromptAction(), this.text('node_save_invalid'));
+      return;
+    }
+    if (this.editingId.length === 0) {
+      this.vm.addNode(node);
+      Toast.show(this.getUIContext().getPromptAction(), this.text('node_added'));
+    } else {
+      this.vm.updateNode(node);
+      Toast.show(this.getUIContext().getPromptAction(), this.text('node_saved'));
+    }
+    this.sheetShown = false;
+  }
+
+  /** Sheet 内容 */
+  @Builder
+  nodeEditSheetContent() {
+    NodeEditSheet({
+      form: this.editForm,
+      isEdit: this.editingId.length > 0,
+      groups: this.groupOptions,
+      onSave: () => {
+        this.saveSheet();
+      },
+      onCancel: () => {
+        this.sheetShown = false;
+      }
+    })
   }
 
   /** 当前排序键 */
@@ -108,6 +176,15 @@ struct NodesPage {
           .fontSize(FontSizes.caption)
           .fontColor(Theme.textSecondary)
           .width('100%')
+
+        Button($r('app.string.nodes_add'))
+          .fontSize(FontSizes.caption)
+          .backgroundColor(Theme.surfaceAlt)
+          .fontColor(Theme.brand)
+          .width('100%')
+          .onClick(() => {
+            this.openAddSheet();
+          })
       }
       .width('100%')
       .padding({ left: Dimens.page, right: Dimens.page, bottom: Dimens.item })
@@ -138,6 +215,13 @@ struct NodesPage {
     .width('100%')
     .height('100%')
     .backgroundColor(Theme.bg)
+    .bindSheet(this.sheetShown, this.nodeEditSheetContent(), {
+      height: SheetSize.MEDIUM,
+      dragBar: true,
+      onDisappear: () => {
+        this.sheetShown = false;
+      }
+    })
   }
 
   /** 单行节点卡片 */
@@ -189,6 +273,12 @@ struct NodesPage {
               this.select(node.id);
             })
         }
+        Text($r('app.string.nodes_edit'))
+          .fontSize(FontSizes.caption)
+          .fontColor(Theme.brand)
+          .onClick(() => {
+            this.openEditSheet(node);
+          })
         Text($r('app.string.nodes_delete'))
           .fontSize(FontSizes.caption)
           .fontColor(Theme.error)

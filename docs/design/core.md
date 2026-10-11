@@ -457,7 +457,7 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
 | 状态结果 | `{running, version, fd, lastError?}` | `{running, pid, version}` |
 | 延迟测试 | `PingService.Tcping` + `{host, port, timeoutMs}` → `{delayMs, reachable, address, ip, resolveMs, error?}` | `testLatency` + `{address, port, timeoutMs}` → `{latencyMs, timeout}` |
 | 配置校验 | `ValidatorService.ValidateConfig` + `{config, configLocation, configPath}` → `{valid, errors[], …}` | `validateNode` + `?` → `{valid}` |
-| 未实现的能力 | — | `testSpeed`、`generateConfig`、`runtimeInfo` |
+| 未实现的能力 | — | `testSpeed`、`runtimeInfo`（`generateConfig` 见 §7.4） |
 
 服务名支持**大小写敏感**的精确匹配；`BridgeService.VERSION = 'version'` 这样的名字
 在原生侧会被 `ipc.SplitService` 直接判为「不是 Group.Method 形式」并返回错误信封。
@@ -488,6 +488,43 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
    显式立项；目前它们既不在原生实现里，也没有在契约里。
 5. 在契约对齐之前，UI 侧应保持 `MOCK_BRIDGE = true`（现状即如此），
    否则 `NativeBridgeImpl` 只会返回 `native-bridge-not-linked`。
+
+### 7.4 现状更新（2026-10-11）
+
+§7.1~§7.3 记录的是两侧分歧当时的快照，**保留不改**。此后发生的变化登记在此：
+
+1. **契约已收敛**：权威定义在 [`ipc-contract.md`](ipc-contract.md)，UI 侧
+   `Bridge.ets` 已全部改为 `Group.Method` 命名。§7.1 表里的"未实现的能力"只剩
+   `testSpeed` 与 `runtimeInfo`。
+
+2. **`generateConfig` 的归属已裁决：放在原生侧，不是 ArkTS 侧的 `CoreConfigManager`。**
+   §7.3 第 4 条给了两个选项，选后者的理由只有一条但足够硬：**只有 Go 侧能链接
+   Xray 自己的 loader**，于是"生成 → 用内核的 loader 验收"可以闭环在同一个
+   `go test` 里跑。在 OHOS 工具链打通前这是唯一的自动化验证手段。
+   实现见 `golang/service/config/{config.go,build.go}`，验收见 `config_test.go`
+   （12 组协议/传输组合必须被 `xcore.LoadConfig` 接受，外加 4 组"内核已删除的特性"
+   反向断言）。
+
+3. **`proxy/tun` 其实一直都在二进制里**，§6.5 结尾那句"`registry` 包刻意不导入
+   `proxy/tun`（否则只会引入默认空实现）"**与事实不符**，`registry/registry.go`
+   的注释也已同步修正。真实链路是：
+   `registry` → `main/json` → `infra/conf` →（**直接**导入并使用 `tun.Config`）
+   `proxy/tun`，而 `proxy/tun/handler.go` 的 `init()` 会 `RegisterConfig`。
+   另外 `tun_android.go` 的 build tag 是 `//go:build android`，空实现是
+   `tun_default.go`（`!linux && !windows && !android && !darwin`），GOOS=android
+   下选中的并不是空实现。**§6.5 的 TODO 第 4 步（往 registry 里加 proxy/tun）因此
+   已经自动满足**，剩下要做的只有 fd handoff 与 socket protect 本身。
+
+4. **rule 模式在没有 geo 资源时会主动降级**：内核装载 `geoip:`/`geosite:` 规则时
+   缺文件是**硬失败**（`failed to open file: geoip.dat`，会让整份配置被拒），
+   所以 `ConfigService.Generate` 先探测 `assetDir`，资源不在就不生成按国家分流的
+   规则，改为「显式私有网段 CIDR 直连 + 其余走代理」，并在 `notes` 里说明。
+   §6.5 里没有预料到这一点，属于新增结论。
+
+5. **本版本内核删掉的东西（对 UI/模型有直接影响）**：`h2`/`h3`/`http` 传输、
+   `quic` 传输、`tlsSettings.allowInsecure`、`kcp header & seed`（搬到了
+   `finalmask`）。这些在 `build.go` 里都有对应的挡板与 `notes`，反向断言见
+   `config_test.go` 的 `TestRemovedFeaturesAreRejectedByCore`。
 
 ## 8. 测试与验收
 

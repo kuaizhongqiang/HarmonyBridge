@@ -427,9 +427,19 @@ struct SettingsPage {
  * 编译器报 `'content()' does not meet UI component syntax`。
  * 传入 UI 结构的唯一受支持写法是 @BuilderParam + 尾随闭包（结构体）。
  */
+@Builder
+function emptyCardContent(): void {
+}
+
 @ComponentV2
 struct SettingsCard {
-  @BuilderParam contentSection: () => void;
+  /**
+   * 卡片内容。必须给默认值：预览器的 lint 规则
+   * `mandatory-default-value-for-local-initialization` 要求「支持本地初始化的组件属性」
+   * 必须有合法且不依赖运行时的默认值，否则预览会被拦截（"Preview check failed"）。
+   * 本页 6 个分组都传了尾随闭包，这个默认值不会被实际渲染。
+   */
+  @BuilderParam contentSection: () => void = emptyCardContent;
 
   build() {
     Column() {

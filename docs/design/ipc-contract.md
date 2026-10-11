@@ -87,7 +87,7 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
 | `CoreService.Stop` | `{}` | `{stopped}` | ✅ |
 | `CoreService.Status` | `{}` | `{running, version, lastError?}` | ✅（`fd` 字段随 §5 移除） |
 | `CoreService.RuntimeInfo` | `{}` | `{socksPort, httpPort, logPath?}` | ❌ 待实现 |
-| `ConfigService.Generate` | `{nodeId, routingMode, extra}` | `{configPath, assetPath}` | ❌ 待实现 |
+| `ConfigService.Generate` | `{nodeId, routingMode, extra, assetDir}` | `{configJson, socksPort, httpPort, outboundTag, protocol, transport, security, geoAssets, notes[]}` | ✅ 已实现（`golang/service/config`） |
 | `LogService.Tail` | `{limit}` | `{lines[], count}` | ✅ |
 | `LogService.Clear` | `{}` | `{cleared}` | ✅ |
 | `PingService.Tcping` | `{host, port, timeoutMs?}` | `{latencyMs, reachable, address, ip?, resolveMs?, error?}` | ⚠️ 字段名为 `delayMs`，待改名 |
@@ -116,6 +116,16 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
 4. 新增 `CoreService.RuntimeInfo`、`ConfigService.Generate`、`PingService.SpeedTest`。
 5. `main_test.go` 的 `expectedRoutes` 同步更新，并**保持"漂移即失败"的严格性**。
 6. `CoreService.Status` 移除 `fd` 字段（或标注为 reserved）。
+7. ~~**`ConfigService.Generate` 的 `extra` 语义待确认**~~ **已确认并实现**：
+   `extra` = 节点完整字段的 JSON（`model/ServerNode.ets` 的 `NodeJson` / `nodeToJsonText`），
+   `nodeId` 仅用于日志与回显 —— Go 侧没有也不应该有节点表。实现见
+   `entry/src/main/golang/service/config/{config.go,build.go}`，两侧字段名的守卫是
+   `config_test.go` 的 `TestParseNodeMatchesArktsFieldNames`。
+   同批新增的 `assetDir` 参数用于探测 `geoip.dat` / `geosite.dat`：**缺文件时内核会拒绝
+   含 `geoip:`/`geosite:` 规则的整份配置**（不是忽略那一条），因此 rule 模式必须先探测
+   再决定是否生成按国家分流的规则。结果里的 `configJson` 由 ArkTS 侧落盘
+   （`ets/core/ConfigStore.ets`）后交给 `CoreService.Start` 的 `configLocation` ——
+   沙箱布局只有 ArkTS 知道，原生侧不掺和。相关 UI 侧说明见 [`ui.md`](ui.md) §5.5。
 
 > 在这些改动完成之前，UI 必须保持 `MOCK_BRIDGE = true`。
 > 这不是"临时妥协"，而是**正确的当前状态**：契约已冻结，实现尚未跟上，且这一点被明确记录。

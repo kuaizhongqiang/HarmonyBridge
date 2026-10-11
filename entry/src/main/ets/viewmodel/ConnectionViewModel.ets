@@ -14,8 +14,9 @@
  */
 import { common } from '@kit.AbilityKit';
 import { ConnectionState, emptyTrafficStats, RoutingMode, TrafficStats } from '../model/Types';
-import { ServerNode } from '../model/ServerNode';
+import { nodeToJsonText, ServerNode } from '../model/ServerNode';
 import { Bridge, ConfigPathResult, MOCK_BRIDGE, StartCoreResult } from '../core/Bridge';
+import { ConfigStore } from '../core/ConfigStore';
 import { TrafficMonitor } from '../core/TrafficMonitor';
 import { Logger } from '../utils/Logger';
 import { nodeViewModel } from './NodeViewModel';
@@ -119,11 +120,21 @@ export class ConnectionViewModel {
     this.transition(ConnectionState.CONNECTING);
     try {
       const settings = settingsViewModel.snapshot();
+      // extra = 节点完整字段的 JSON（见 model/ServerNode.ets#nodeToJsonText 与
+      // docs/design/ipc-contract.md §4 「ConfigService.Generate」）。
+      // 原生侧只认这份 JSON，不去查 ArkTS 的节点表。
+      const filesDir: string = context !== undefined ? context.filesDir : '';
       const generated: ConfigPathResult = await Bridge.generateConfig(
         node.id,
         settings.routingMode.toString(),
-        ''
+        nodeToJsonText(node),
+        ConfigStore.pathsOf(filesDir)
       );
+      // 生成器的妥协项（被内核删除的特性、分流降级）必须落到日志里，
+      // 否则用户只会看到"连上了但行为不对"。
+      for (let i = 0; i < generated.notes.length; i++) {
+        Logger.warn(TAG, 'config note: ' + generated.notes[i]);
+      }
       this.configPath = generated.configPath;
       this.assetPath = generated.assetPath;
 

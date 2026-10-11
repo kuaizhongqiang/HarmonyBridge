@@ -3,7 +3,7 @@
  * 节点合法性校验与去重（纯逻辑，无 UI）。
  * 对应 v2rayN 的「移除无效服务器 / 移除重复服务器」动作。
  */
-import { ProxyProtocol, SecurityKind } from '../model/Types';
+import { ProxyProtocol, SecurityKind, TransportKind } from '../model/Types';
 import { nodeEndpointText, ServerNode } from '../model/ServerNode';
 /** 校验结果 */
 export interface ValidationResult {
@@ -45,6 +45,9 @@ export function validateNode(node: ServerNode): ValidationResult {
   if (node.security === SecurityKind.REALITY && node.publicKey.trim().length === 0) {
     issues.push('missing-public-key');
   }
+  if (node.transport === TransportKind.GRPC && node.serviceName.trim().length === 0) {
+    issues.push('missing-grpc-service-name');
+  }
   if (node.protocol === ProxyProtocol.UNKNOWN) {
     issues.push('unknown-protocol');
   }
@@ -52,11 +55,16 @@ export function validateNode(node: ServerNode): ValidationResult {
   return result;
 }
 
-/** 节点去重关键字：协议 + 地址 + 端口 + 凭据 + 传输 */
+/**
+ * 节点去重关键字：协议 + 地址 + 端口 + 凭据 + 传输 + REALITY 参数。
+ *
+ * 为什么要带 `publicKey` / `shortId`：同一台服务器上不同 REALITY 站点（不同 pbk/sid）
+ * 是**不同的出站配置**，只按 address:port 合并会把它们错误地吞掉。
+ */
 export function nodeDedupeKey(node: ServerNode): string {
   return node.protocol.toString() + '|' + node.address.toLowerCase() + '|' + node.port.toString() + '|' +
     node.userId + '|' + node.password + '|' + node.transport.toString() + '|' + node.path + '|' +
-    node.serviceName;
+    node.serviceName + '|' + node.sni + '|' + node.publicKey + '|' + node.shortId;
 }
 
 /**

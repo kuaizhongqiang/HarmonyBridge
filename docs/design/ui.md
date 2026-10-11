@@ -22,7 +22,7 @@
 | 路由 | 文件 | 对应 v2rayN | 主要内容 |
 | --- | --- | --- | --- |
 | `pages/Index` | `pages/Index.ets` | MainWindow + StatusBarView | 当前节点（名称/协议/地址/延迟）、连接-断开大按钮、路由模式、上/下行速率、累计流量、内核版本、四个快捷入口、底部 Tab |
-| `pages/NodesPage` | `pages/NodesPage.ets` | ProfilesView | 节点列表（协议标签 / 别名 / 地址:端口 / 传输 / TLS / 延迟徽标 / 来源订阅 / 选中高亮）、关键字过滤、排序（默认/名称/延迟 + 升降序）、测试延迟、删除、切换当前节点 |
+| `pages/NodesPage` | `pages/NodesPage.ets` | ProfilesView + AddServerWindow | 节点列表（协议标签 / 别名 / 地址:端口 / 传输 / TLS / 延迟徽标 / 来源订阅 / 选中高亮）、关键字过滤、排序（默认/名称/延迟 + 升降序）、测试延迟、添加节点、编辑节点、删除、切换当前节点。添加/编辑走底部半屏 Sheet（见 §5.5） |
 | `pages/SubscriptionsPage` | `pages/SubscriptionsPage.ets` | SubSettingWindow + 订阅菜单 | 订阅列表（名称 / 地址 / 节点数 / 上次更新 / 上次错误）、新增与编辑弹窗、单条更新、全部更新、启用开关、剪贴板导入 |
 | `pages/SettingsPage` | `pages/SettingsPage.ets` | OptionSettingWindow / RoutingSettingWindow / DNSSettingWindow | 路由（模式、大陆直连、自定义规则集）、VPN/TUN（TUN、MTU 滑杆、IPv6、允许局域网）、DNS 与嗅探、分应用代理、日志（级别、写文件）、关于（应用版本、内核版本、许可、仓库） |
 | `pages/LogsPage` | `pages/LogsPage.ets` | MsgView | 级别过滤（全部/Debug/Info/Warn/Error）、滚动日志、复制到剪贴板、清空 |
@@ -185,6 +185,11 @@ core/TrafficMonitor ◀────────────────┘（同
 - 表单/选择统一用 `components/OptionPickerDialog.ets`（路由模式 / 分应用模式 / 日志级别）与
   `components/SubscriptionEditDialog.ets`（订阅新增编辑）。选项文案以 `string[]` 传入，
   key 由弹窗内按 `kind` 固定枚举，避免「运行时可变的选项数组 + 弹窗不同步」。
+- 节点「添加 / 编辑」用 **底部半屏 Sheet**（`bindSheet` + `components/NodeEditSheet.ets`，
+  见 §5.5）。该表单的 20+ 个字段**不放在 Sheet 组件内部**，而是由页面持有一个
+  `viewmodel/NodeEditForm.ets` 的 `@ObservedV2` 表单对象、以 `@Param` 传入只读渲染 ——
+  这样无论 Sheet 内容是否随开关重建，绑定值一定是最新的，也避免依赖「Sheet 每次打开都重建」
+  这一生命周期假设。
 
 ---
 
@@ -275,8 +280,52 @@ export const CoreAvailable: () => string;
 ### 5.4 尚未实现（后续工作流）
 
 1. 内核进程的拉起与保活（当前 `VpnAbility.onConnect` 里是 `TODO(native)`）。
-2. 节点编辑表单（手动添加 VMess/VLESS/Trojan/SS 的完整字段）——模型与 `NodeViewModel.createDraft()`
-   / `updateNode()` 已就绪，缺 UI 表单。
-3. 测速（`testSpeed`）与 UDP 测试、路由规则集编辑（当前设置里只有开关）。
-4. 设置持久化（preferences）与订阅自动更新调度。
-5. 分享链接导出 / 二维码（v2rayN 的 `menuAddServerViaScan` / `QrcodeView` 对应能力）。
+2. 测速（`testSpeed`）与 UDP 测试、路由规则集编辑（当前设置里只有开关）。
+3. 设置持久化（preferences）与订阅自动更新调度。
+4. 分享链接导出 / 二维码（v2rayN 的 `menuAddServerViaScan` / `QrcodeView` 对应能力）。
+
+### 5.5 节点编辑表单（已落地）
+
+入口与形态：
+
+- 入口：`pages/NodesPage.ets` 动作栏的「添加节点」按钮 + 每个节点行的「编辑」文字动作。
+- 形态：`bindSheet(this.sheetShown, this.nodeEditSheetContent(), { height: SheetSize.MEDIUM })`
+  → 底部半屏、内容可滚动；关闭后 `onDisappear` 回写 `sheetShown = false`（单向 `isShow`，
+  不使用 `$$`，避免依赖两向绑定的编译期支持）。
+- 组件：`components/NodeEditSheet.ets`（渲染 + 四个内部小结构体 `NodeTextField` /
+  `NodeSelectField` / `NodeSwitchField` / `NodeFormSection`）。
+- 状态：`viewmodel/NodeEditForm.ets`（`@ObservedV2` + `@Trace`），由页面持有、Sheet 以 `@Param` 只读渲染。
+- 选项表：`constants/NodeOptions.ets`，取值逐条对齐 v2rayN `ServiceLib/Global.cs` 与
+  `AddServerWindow` 的内联列表（协议 / 传输 / 安全 / raw 伪装类型 / kcp 伪装类型 / XHTTP 模式 /
+  gRPC 模式 / 指纹 / flow / VMess 与 SS 加密方式）。
+
+字段集（对齐 v2rayN AddServerWindow，按条件显隐）：
+
+| 分组 | 字段 |
+| --- | --- |
+| 基础 | 分组（`subscriptionName` == v2rayN 的 `Subid`）、别名、协议、地址、端口 |
+| 协议参数 | 用户 ID（含「生成」UUID 按钮）、密码、加密方式、alterId、flow、开启 Mux |
+| 底层传输方式 | 传输协议、Host、路径、serviceName、raw 伪装类型、kcp 伪装类型、gRPC 模式、XHTTP 模式、XHTTP extra、Finalmask |
+| 传输层安全 | 传输层安全（none/tls/reality）、SNI、Fingerprint、Alpn、跳过证书验证、PublicKey、ShortId、SpiderX |
+
+`ServerNode` 因此新增字段：`muxEnabled` / `rawHeaderType` / `kcpHeaderType` / `grpcMode` /
+`xhttpMode` / `xhttpExtra` / `finalmask` / `allowInsecure` / `spiderX`。
+
+**为什么没有单独的「分组名」字段**：v2rayN 的 `ProfileItem` 本身没有组名字符串，它用 `Subid`
+表示节点属于哪一份配置项；本项目对应 `subscriptionId` + `subscriptionName`。
+表单的分组下拉直接读写这两个字段，避免出现第二份会漂移的分组状态。
+
+同批同步的解析链：
+
+- `service/ShareLinkParser.ets`：`applyQueryOptions` 新增 `headertype` / `mode` / `extra` /
+  `insecure|allowinsecure` / `fm|finalmask` / `mux` / `spx`；vmess JSON 的 `type` 按传输方式
+  落到 `rawHeaderType` 或 `kcpHeaderType`。
+- `service/SubscriptionParser.ets`：Clash 条目新增 `skip-cert-verify` / `client-fingerprint` /
+  `alpn` / `header-type`，并把这些字段带进拼接出的分享链接。
+- `service/NodeValidator.ets`：去重关键字补上 `sni` / `publicKey` / `shortId`（同一台服务器上不同
+  REALITY 站点是不同出站，不应被合并）；新增 `transport == grpc && serviceName 为空` 的校验项。
+
+生成配置链路：`ConnectionViewModel.connect()` 把 `nodeToJsonText(node)`（`model/ServerNode.ets` 的
+`NodeJson` 显式结构）作为 `ConfigService.Generate` 的 `extra` 参数发送。该参数的**内容**是本次
+新增的约定，原生侧实现前需确认 —— 已登记在
+[`ipc-contract.md`](ipc-contract.md) §5 待收敛清单。

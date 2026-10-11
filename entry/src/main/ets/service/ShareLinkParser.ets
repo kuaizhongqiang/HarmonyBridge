@@ -100,12 +100,19 @@ function splitFragment(link: string): string[] {
 
 /**
  * 解析 `key=value&...` 查询串，写回节点字段。
- * 支持 vless/trojan/hysteria2 的常见参数：type/security/sni/host/path/serviceName/flow/pbk/sid/fp/alpn
+ * 支持 vless/trojan/hysteria2 的常见参数：
+ *   type/security/sni/host/path/serviceName/flow/pbk/sid/spx/fp/alpn/encryption
+ *   headertype（raw / kcp 伪装类型）、mode（XHTTP / gRPC 模式）、extra（XHTTP extra）
+ *   insecure/allowinsecure（跳过证书校验）、fm（Finalmask）、mux（Mux 开关）
+ *
+ * `mode` 在 v2rayN 里同时用于 gRPC 与 XHTTP，具体落到哪个字段取决于**最终**的传输方式，
+ * 而查询串里 `mode` 可能出现在 `type` 之前，所以先记在局部变量里，循环结束后再归属。
  */
 export function applyQueryOptions(node: ServerNode, query: string): void {
   if (query.length === 0) {
     return;
   }
+  let modeText: string = '';
   const pairs: string[] = query.split('&');
   for (let i = 0; i < pairs.length; i++) {
     const pair: string = pairs[i];
@@ -136,12 +143,39 @@ export function applyQueryOptions(node: ServerNode, query: string): void {
       node.publicKey = value;
     } else if (key === 'sid' || key === 'shortid') {
       node.shortId = value;
+    } else if (key === 'spx' || key === 'spiderx') {
+      node.spiderX = value;
     } else if (key === 'fp' || key === 'fingerprint') {
       node.fingerprint = value;
     } else if (key === 'alpn') {
       node.alpn = value;
     } else if (key === 'encryption') {
       node.securityCipher = value;
+    } else if (key === 'headertype' || key === 'header') {
+      // raw 与 kcp 的伪装类型共用链接参数名，按传输方式归属
+      if (node.transport === TransportKind.KCP) {
+        node.kcpHeaderType = value;
+      } else {
+        node.rawHeaderType = value;
+      }
+    } else if (key === 'mode') {
+      modeText = value;
+    } else if (key === 'extra') {
+      node.xhttpExtra = value;
+    } else if (key === 'insecure' || key === 'allowinsecure') {
+      node.allowInsecure = value.toLowerCase() === 'true' || value === '1';
+    } else if (key === 'fm' || key === 'finalmask') {
+      node.finalmask = value;
+    } else if (key === 'mux') {
+      node.muxEnabled = value.toLowerCase() === 'true' || value === '1';
+    }
+  }
+
+  if (modeText.length > 0) {
+    if (node.transport === TransportKind.GRPC) {
+      node.grpcMode = modeText;
+    } else if (node.transport === TransportKind.XHTTP) {
+      node.xhttpMode = modeText;
     }
   }
 }
@@ -243,6 +277,15 @@ function parseVmess(raw: string, id: NodeId, now: Timestamp): ServerNode | undef
   node.sni = jsonStr(parsed, 'sni');
   node.alpn = jsonStr(parsed, 'alpn');
   node.fingerprint = jsonStr(parsed, 'fp');
+  // vmess 的 type 是「伪装类型」：kcp 与 raw/tcp 共用，按传输方式归属
+  const headerText: string = jsonStr(parsed, 'type');
+  if (headerText.length > 0) {
+    if (node.transport === TransportKind.KCP) {
+      node.kcpHeaderType = headerText;
+    } else {
+      node.rawHeaderType = headerText;
+    }
+  }
   const tlsText: string = jsonStr(parsed, 'tls');
   if (tlsText.length > 0) {
     node.security = securityFromText(tlsText);

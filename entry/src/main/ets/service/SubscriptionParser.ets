@@ -162,6 +162,14 @@ interface ClashProxy {
   wsHost: string;
   grpcServiceName: string;
   alterId: number;
+  /** 跳过证书校验（skip-cert-verify） */
+  skipCertVerify: boolean;
+  /** uTLS 指纹（client-fingerprint） */
+  fingerprint: string;
+  /** ALPN（alpn） */
+  alpn: string;
+  /** 伪装类型（kcp-opts.header / 顶层 header-type） */
+  headerType: string;
 }
 
 /**
@@ -253,7 +261,11 @@ function newClashProxy(): ClashProxy {
     wsPath: '',
     wsHost: '',
     grpcServiceName: '',
-    alterId: 0
+    alterId: 0,
+    skipCertVerify: false,
+    fingerprint: '',
+    alpn: '',
+    headerType: ''
   };
   return proxy;
 }
@@ -300,6 +312,15 @@ function applyClashPair(proxy: ClashProxy, line: string, inWsOpts: boolean): voi
     }
   } else if (key === 'grpc-service-name') {
     proxy.grpcServiceName = value;
+  } else if (key === 'skip-cert-verify') {
+    proxy.skipCertVerify = value.toLowerCase() === 'true';
+  } else if (key === 'client-fingerprint') {
+    proxy.fingerprint = value;
+  } else if (key === 'alpn') {
+    proxy.alpn = value;
+  } else if (key === 'header-type' || key === 'header') {
+    // kcp-opts.header 与顶层 header-type 都是「伪装类型」
+    proxy.headerType = value;
   }
 }
 
@@ -311,8 +332,9 @@ function clashProxyToNode(proxy: ClashProxy, index: number, now: Timestamp): Ser
     // 借助 vmess 分享链接复用解析逻辑，避免维护第二套字段映射
     const jsonText: string = '{"ps":"' + proxy.name + '","add":"' + proxy.server + '","port":"' +
       proxy.port.toString() + '","id":"' + proxy.uuid + '","aid":"' + proxy.alterId.toString() + '","net":"' +
-      proxy.network + '","path":"' + proxy.wsPath + '","host":"' + proxy.wsHost + '","tls":"' +
-      (proxy.tls ? 'tls' : '') + '","sni":"' + proxy.sni + '","scy":"' + proxy.cipher + '"}';
+      proxy.network + '","type":"' + proxy.headerType + '","path":"' + proxy.wsPath + '","host":"' +
+      proxy.wsHost + '","tls":"' + (proxy.tls ? 'tls' : '') + '","sni":"' + proxy.sni + '","scy":"' +
+      proxy.cipher + '","fp":"' + proxy.fingerprint + '","alpn":"' + proxy.alpn + '"}';
     link = 'vmess://' + encodeBase64(jsonText);
   } else if (proxy.type === 'vless') {
     link = buildStandardLink('vless', proxy.uuid, proxy, index);
@@ -334,7 +356,11 @@ function buildStandardLink(scheme: string, credential: string, proxy: ClashProxy
     (proxy.sni.length > 0 ? '&sni=' + proxy.sni : '') +
     (proxy.wsPath.length > 0 ? '&path=' + proxy.wsPath : '') +
     (proxy.wsHost.length > 0 ? '&host=' + proxy.wsHost : '') +
-    (proxy.grpcServiceName.length > 0 ? '&serviceName=' + proxy.grpcServiceName : '');
+    (proxy.grpcServiceName.length > 0 ? '&serviceName=' + proxy.grpcServiceName : '') +
+    (proxy.fingerprint.length > 0 ? '&fp=' + proxy.fingerprint : '') +
+    (proxy.alpn.length > 0 ? '&alpn=' + proxy.alpn : '') +
+    (proxy.headerType.length > 0 ? '&headertype=' + proxy.headerType : '') +
+    (proxy.skipCertVerify ? '&insecure=true' : '');
   return scheme + '://' + credential + '@' + proxy.server + ':' + proxy.port.toString() + query + '#' +
     proxy.name + '-' + index.toString();
 }

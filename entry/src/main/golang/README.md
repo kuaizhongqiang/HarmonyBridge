@@ -17,6 +17,7 @@ ArkTS  →  libbridge.so (NAPI C++)  →  libcore.so (Go, c-shared)  →  Xray-c
 | `app/app.go` | 汇总导入：所有服务 + 特性注册表 |
 | `registry.go` | 空白导入 Xray 的代理/传输/特性包，保证二进制功能完整 |
 | `service/core/` | `CoreService.Start / Stop / Status` —— 内核生命周期 |
+| `service/config/` | `ConfigService.Generate` —— 节点 JSON -> `config.json`（生成后立即用 Xray 自己的 loader 自检；返回文本，落盘由 ArkTS 侧的 `ConfigStore` 完成） |
 | `service/version/` | `VersionService.GetVersion` —— 报告 Xray-core 版本 |
 | `service/log/` | 环形缓冲日志 + `LogService.Tail / Clear` |
 | `service/ping/` | `PingService.Tcping` —— TCP 连接延迟测试 |

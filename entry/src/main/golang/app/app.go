@@ -24,6 +24,11 @@ import (
 
 	// Step 2: the service catalogue. Each of these registers one or more
 	// "<Group>.<Method>" routes with the ipc registry.
+	//
+	// service/config comes first: unlike the others it links Xray's own config
+	// loader (infra/conf) to build a full config.json from a node, so it must
+	// be initialised after every protocol/transport factory is registered.
+	_ "harmonybridge/core/service/config"
 	_ "harmonybridge/core/service/core"
 	_ "harmonybridge/core/service/log"
 	_ "harmonybridge/core/service/ping"

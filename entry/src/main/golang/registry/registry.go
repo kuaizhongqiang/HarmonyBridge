@@ -69,17 +69,22 @@ import (
 	_ "github.com/xtls/xray-core/transport/internet/headers/noop"
 
 	// The JSON config loader, so core.LoadConfig("json", ...) works.
+	//
+	// NOTE: this import is also what brings in `proxy/tun`. `main/json` imports
+	// `infra/conf`, and `infra/conf/tun.go` imports `proxy/tun` **directly**
+	// (it uses tun.Config), whose handler.go registers the inbound with
+	// common.RegisterConfig. So the tun inbound IS part of this binary - there
+	// is no "deliberately not imported" state, and adding an explicit blank
+	// import of proxy/tun here would be a no-op.
+	//
+	// What is still missing is not the import but the runtime plumbing:
+	// under GOOS=android (Go has no ohos target) the selected backend is
+	// tun_android.go (`//go:build android`), which reads the fd from the
+	// xray.tun.fd env var and wraps it with gvisor fdbased. Note the empty
+	// stub is tun_default.go (`!linux && !windows && !android && !darwin`),
+	// which is NOT what android selects. Whether the android backend behaves
+	// correctly on OHOS musl is UNVERIFIED - core.CoreService.Start therefore
+	// reports Wired=false until the fd handoff is exercised on a device.
+	// See docs/design/core.md sections "tun fd handoff" and §7.4.
 	_ "github.com/xtls/xray-core/main/json"
-	// NOTE: proxy/tun is deliberately NOT imported here.
-	//
-	// Its backends are selected by build tag, and under GOOS=android (the only
-	// option we have - Go has no ohos target) the *android* backend is chosen:
-	// tun_android.go is tagged `android`, while tun_linux.go is tagged
-	// `linux && !android` and is therefore dead code for us. The android
-	// backend wraps a file descriptor taken from the xray.tun.fd env var with
-	// gvisor fdbased, and whether that works on OHOS is UNVERIFIED.
-	//
-	// Importing it today would only pull in behaviour we cannot yet exercise,
-	// so it is left out until the tun fd handoff is validated on a device.
-	// See docs/design/core.md, section "tun fd handoff".
 )

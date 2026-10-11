@@ -23,6 +23,7 @@ import {
   WANT_KEY_CONFIG_PATH
 } from '../constants/Common';
 import { Logger } from '../utils/Logger';
+import { ConfigStore, CorePaths } from './ConfigStore';
 
 const TAG: string = 'Bridge';
 
@@ -113,6 +114,41 @@ function asFields(value: Object | undefined): Record<string, Object> {
   return value as Record<string, Object>;
 }
 
+/** 从信封结果里取字符串字段（类型不符时返回空串） */
+function stringField(result: Record<string, Object>, key: string): string {
+  const value: Object | undefined = result[key];
+  return typeof value === 'string' ? value as string : '';
+}
+
+/** 从信封结果里取布尔字段（类型不符时返回 false） */
+function boolField(result: Record<string, Object>, key: string): boolean {
+  const value: Object | undefined = result[key];
+  return typeof value === 'boolean' ? value as boolean : false;
+}
+
+/**
+ * 从信封结果里取字符串数组。
+ *
+ * 这里不用 `Array.isArray`（仓库里没有先例，ArkTS 的可用性未经验证），
+ * 而是直接按 `Object[]` 收窄后逐个判断元素类型：字段缺失时 `length` 为
+ * undefined，循环自然不会执行，等价于返回空数组。
+ */
+function stringArrayField(result: Record<string, Object>, key: string): string[] {
+  const out: string[] = [];
+  const value: Object | undefined = result[key];
+  if (value === undefined || value === null) {
+    return out;
+  }
+  const items: Object[] = value as Object[];
+  for (let i = 0; i < items.length; i++) {
+    const item: Object | undefined = items[i];
+    if (typeof item === 'string') {
+      out.push(item as string);
+    }
+  }
+  return out;
+}
+
 /** 组装失败信封 */
 function failure(error: string): NativeEnvelope {
   const envelope: NativeEnvelope = { success: false, result: emptyResult(), error: error };
@@ -191,8 +227,14 @@ export interface LatencyResult {
 
 /** 内核配置生成结果 */
 export interface ConfigPathResult {
+  /** 内核配置文件路径（真实模式下由 ArkTS 落盘得到） */
   configPath: string;
+  /** 分流资源目录（geoip.dat / geosite.dat 放这里） */
   assetPath: string;
+  /** 生成器的诚实提示：被内核删除的特性、分流失效降级等，UI 应展示 */
+  notes: string[];
+  /** geoip.dat / geosite.dat 是否就位（决定 rule 模式能否按国家分流） */
+  geoAssets: boolean;
 }
 
 /** 内核实现接口：MockBridge 与 NativeBridge 都实现它 */
@@ -253,9 +295,13 @@ class MockBridgeImpl implements IBridge {
       return success(result);
     }
     if (service === BridgeService.GENERATE_CONFIG) {
+      // MOCK 故意不返回 configJson：Bridge 只在拿到配置文本时才落盘，
+      // 这样在预览器里点"连接"不会产生任何文件系统副作用。
       const result: ConfigPathResult = {
-        configPath: '/data/storage/el2/base/haps/entry/files/config.json',
-        assetPath: '/data/storage/el2/base/haps/entry/files/assets'
+        configPath: '/data/storage/el2/base/haps/entry/files/core/config.json',
+        assetPath: '/data/storage/el2/base/haps/entry/files/assets',
+        notes: [],
+        geoAssets: false
       };
       return success(result);
     }
@@ -339,26 +385,53 @@ export class Bridge {
     return result;
   }
 
-  /** 生成内核配置并返回路径 */
+  /**
+   * 生成内核配置并返回可用的配置文件路径。
+   *
+   * 分工（契约见 docs/design/ipc-contract.md §4「ConfigService.Generate」）：
+   *   * **生成**在原生侧（Go 的 service/config）：只有它能链接 Xray 自己的
+   *     loader，从而在生成本身就完成一次自检；
+   *   * **落盘**在这里：沙箱布局（filesDir）只有 ArkTS 知道，原生侧不应该知道。
+   *
+   * @param paths CorePaths（filesDir + assetDir）。assetDir 会被传给原生用于
+   *              探测 geoip.dat / geosite.dat 是否就位 —— 缺文件时内核会
+   *              拒绝含 geoip:/geosite: 规则的**整份**配置，不是忽略那一条。
+   */
   static async generateConfig(
     nodeId: string,
     routingMode: string,
-    extra: string
+    extra: string,
+    paths: CorePaths
   ): Promise<ConfigPathResult> {
     const params: Record<string, Object> = {
       'nodeId': nodeId,
       'routingMode': routingMode,
-      'extra': extra
+      'extra': extra,
+      'assetDir': paths.assetDir
     };
     const envelope: NativeEnvelope = await Bridge.invoke(BridgeService.GENERATE_CONFIG, params);
-    const result: ConfigPathResult = { configPath: '', assetPath: '' };
+    const result: ConfigPathResult = {
+      configPath: '',
+      assetPath: paths.assetDir,
+      notes: [],
+      geoAssets: false
+    };
     if (!envelope.success) {
+      Logger.error(TAG, 'generateConfig failed: ' + envelope.error);
       return result;
     }
-    const configPath: Object | undefined = envelope.result['configPath'];
-    const assetPath: Object | undefined = envelope.result['assetPath'];
-    result.configPath = typeof configPath === 'string' ? configPath as string : '';
-    result.assetPath = typeof assetPath === 'string' ? assetPath as string : '';
+
+    result.notes = stringArrayField(envelope.result, 'notes');
+    result.geoAssets = boolField(envelope.result, 'geoAssets');
+
+    const configJson: string = stringField(envelope.result, 'configJson');
+    if (configJson.length > 0) {
+      result.configPath = ConfigStore.writeConfig(paths.filesDir, configJson);
+    }
+    if (result.configPath.length === 0) {
+      // Mock 实现直接给路径；真实实现落盘失败时也走这里，避免把空路径交给 Start
+      result.configPath = stringField(envelope.result, 'configPath');
+    }
     return result;
   }
 

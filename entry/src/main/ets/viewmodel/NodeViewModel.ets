@@ -135,6 +135,50 @@ export class NodeViewModel {
     return node;
   }
 
+  /** 新增一个手动节点（节点编辑表单保存时调用） */
+  addNode(node: ServerNode): void {
+    // createDraft() 用 'draft-' 前缀做临时 id，真正落库时换成 manual 系列，避免把草稿态写进数据
+    if (node.id.startsWith('draft-')) {
+      this.seq = this.seq + 1;
+      node.id = generateId('manual', this.seq, Date.now());
+    }
+    node.subscriptionId = node.subscriptionId.length === 0 ? SUBSCRIPTION_ID_MANUAL : node.subscriptionId;
+    node.subscriptionName = node.subscriptionName.length === 0
+      ? SUBSCRIPTION_NAME_MANUAL
+      : node.subscriptionName;
+    node.updatedAt = Date.now();
+    this.allNodes.push(node);
+    this.rebuild();
+    this.lastMessage = 'added';
+    Logger.info(TAG, 'added manual node ' + nodeSummary(node));
+  }
+
+  /** 当前已有的订阅名（编辑表单的「分组」下拉用；手动节点不计入） */
+  subscriptionNames(): string[] {
+    const names: string[] = [];
+    for (let i = 0; i < this.allNodes.length; i++) {
+      const name: string = this.allNodes[i].subscriptionName;
+      if (name.length === 0 || name === SUBSCRIPTION_NAME_MANUAL) {
+        continue;
+      }
+      if (names.indexOf(name) < 0) {
+        names.push(name);
+      }
+    }
+    return names;
+  }
+
+  /** 订阅名 -> 订阅 id（表单选了分组后回写 subscriptionId） */
+  subscriptionIdOfName(name: string): string {
+    for (let i = 0; i < this.allNodes.length; i++) {
+      const node: ServerNode = this.allNodes[i];
+      if (node.subscriptionName === name) {
+        return node.subscriptionId;
+      }
+    }
+    return '';
+  }
+
   /** 用订阅解析结果批量替换某订阅的节点（先删旧的，再插入新的） */
   replaceNodesOfSubscription(subscriptionId: string, subscriptionName: string, nodes: ServerNode[]): void {
     const others: ServerNode[] = this.allNodes.filter((node: ServerNode) => {
