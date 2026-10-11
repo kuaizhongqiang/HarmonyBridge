@@ -72,6 +72,26 @@ function Add-Check {
         })
 }
 
+# Persist a resolved path for the STEPS THAT FOLLOW. Under GitHub Actions each
+# step is a fresh process, so a variable this script computed is gone by the
+# next step unless it is handed to GITHUB_ENV. Without this, a workflow could
+# successfully preflight the default DevEco path and then fail in the next step
+# with `Join-Path : Cannot bind argument to parameter 'Path' because it is null`
+# -- which is exactly what happened on the first real release run.
+$script:Exported = New-Object System.Collections.ArrayList
+
+function Export-Env {
+    param(
+        [Parameter(Mandatory = $true)][string] $Name,
+        [string] $Value
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) { return }
+    $null = $script:Exported.Add("$Name=$Value")
+    if ($env:GITHUB_ENV) {
+        Add-Content -LiteralPath $env:GITHUB_ENV -Value "$Name=$Value" -Encoding utf8
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 1. DevEco Studio
 # ---------------------------------------------------------------------------
@@ -128,6 +148,15 @@ Add-Check -Name 'Java runtime' -Ok $javaOk `
     -Fatal:$RequireDeveco
 
 # ---------------------------------------------------------------------------
+# Export the resolved paths for the following steps (see Export-Env).
+# ---------------------------------------------------------------------------
+if ($devecoPresent) { Export-Env -Name 'DEVECO_HOME' -Value $deveco }
+if ($sdkOk) { Export-Env -Name 'DEVECO_SDK_HOME' -Value $sdk }
+if ($javaOk -and $java -and (Test-Path -LiteralPath (Join-Path $java 'bin') -PathType Container)) {
+    Export-Env -Name 'JAVA_HOME' -Value $java
+}
+
+# ---------------------------------------------------------------------------
 # 6. Repository sanity
 # ---------------------------------------------------------------------------
 $metadataPath = Join-Path (Join-Path $RepoRoot 'scripts') 'release-metadata.json'
@@ -162,6 +191,7 @@ if ($Json) {
         repoRoot  = $RepoRoot
         ready     = ($failed.Count -eq 0)
         failures  = @($failed | ForEach-Object { $_.Name })
+        exported  = @($script:Exported)
         checks    = $script:Checks
     } | ConvertTo-Json -Depth 5
 } else {
@@ -169,6 +199,14 @@ if ($Json) {
     foreach ($check in $script:Checks) {
         $mark = if ($check.Ok) { 'OK  ' } else { 'MISS' }
         Write-Host ("  [{0}] {1,-24} {2}" -f $mark, $check.Name, $check.Detail)
+    }
+    if ($script:Exported.Count -gt 0) {
+        Write-Host ''
+        Write-Host '  resolved for subsequent steps:'
+        foreach ($line in $script:Exported) { Write-Host "    $line" }
+        if (-not $env:GITHUB_ENV) {
+            Write-Host '    (not running under GitHub Actions: nothing was written to GITHUB_ENV)'
+        }
     }
 }
 
