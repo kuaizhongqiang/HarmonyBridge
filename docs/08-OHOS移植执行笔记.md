@@ -25,8 +25,33 @@
 
 ## 2. 已实测可用的 patch
 
+### 2.1 仓库里的正式副本（**推荐从这里取**）
+
 ```text
-文件：%TEMP%\ohos-go-port\ohos-port-CLEAN-57.patch   （48,503 B，format-patch 格式）
+tools/ohos-port/CLEAN-57-on-go1.26.5.patch   （48,503 B，git format-patch 格式，已入库）
+```
+
+这是**入库的、可复现的**那一份。用法：
+
+```bash
+git clone --depth 1 --branch go1.26.5 https://github.com/golang/go.git go-ourport
+cd go-ourport
+git apply /path/to/CLEAN-57-on-go1.26.5.patch      # 或 git am
+```
+
+### 2.2 本机上的工作区（**可复现，但可能被清理**）
+
+| 项 | 值 |
+| --- | --- |
+| 位置 | `%TEMP%\ohos-go-port\golang-go`（`%TEMP%` 有被清理风险；仓库里的 patch 才是权威副本） |
+| 分支 | `try-port` |
+| HEAD | `428ecea4 OHOS port: apply CLEAN-57 from official SIG (go1.26.5 base)` |
+| 基线 tag | `go1.26.5` = `c19862e5`；`up-go1.24.5` = `9d828e80`；`sig-go1.24` = `302a5306` |
+| 工作区 | 干净 |
+
+### 2.3 patch 内容与实测结果
+
+```text
 基线：upstream go1.26.5（c19862e5）
 内容：SIG 移植中「上游 1.24→1.26 未改动过」的 57 个文件
 实测：git apply 干净通过；落地 36 个文件含 openharmony 字符串
