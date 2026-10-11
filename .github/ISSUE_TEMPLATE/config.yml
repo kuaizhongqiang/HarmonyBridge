@@ -1,0 +1,14 @@
+# Issue 表单的入口配置。
+# blank_issues_enabled=false 强制走结构化表单：没有环境信息的缺陷报告无法复现，
+# 而 bug_report.yml 会把 DevEco / SDK / 设备 / 核心版本 / 日志都问出来。
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题（请勿公开提交）
+    url: https://github.com/kuaizhongqiang/HarmonyBridge/security/advisories/new
+    about: 涉及密钥泄露、远程代码执行、流量明文外泄等问题的，请走私密报告渠道，不要开公开 issue。
+  - name: 贡献指南
+    url: https://github.com/kuaizhongqiang/HarmonyBridge/blob/master/CONTRIBUTING.md
+    about: 环境搭建、分支与提交规范、本地检查命令、许可证注意事项。
+  - name: 环境与 CI 设计说明
+    url: https://github.com/kuaizhongqiang/HarmonyBridge/blob/master/docs/design/ci.md
+    about: 「为什么 CI 不产出 HAP」「自托管 runner 需要什么」等工程问题的说明。

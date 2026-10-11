@@ -1,8 +1,27 @@
 {
   "float": [
-    {
-      "name": "page_text_font_size",
-      "value": "50fp"
-    }
+    { "name": "page_text_font_size", "value": "50fp" },
+
+    { "name": "font_title", "value": "22fp" },
+    { "name": "font_subtitle", "value": "16fp" },
+    { "name": "font_body", "value": "14fp" },
+    { "name": "font_caption", "value": "12fp" },
+    { "name": "font_display", "value": "28fp" },
+
+    { "name": "radius_card", "value": "16vp" },
+    { "name": "radius_chip", "value": "10vp" },
+    { "name": "radius_small", "value": "8vp" },
+    { "name": "radius_pill", "value": "100vp" },
+
+    { "name": "space_page", "value": "16vp" },
+    { "name": "space_card", "value": "14vp" },
+    { "name": "space_item", "value": "10vp" },
+    { "name": "space_tight", "value": "6vp" },
+
+    { "name": "size_connect_button", "value": "168vp" },
+    { "name": "size_navbar", "value": "56vp" },
+    { "name": "size_titlebar", "value": "52vp" },
+    { "name": "size_icon", "value": "20vp" },
+    { "name": "size_latency_badge_width", "value": "64vp" }
   ]
 }

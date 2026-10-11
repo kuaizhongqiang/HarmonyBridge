@@ -1,0 +1,225 @@
+/**
+ * ConnectionViewModel.ets
+ * 首页/连接状态机：连接、断开、选中节点、实时流量、路由模式。
+ *
+ * 连接流程（真实链路）：
+ *   1. Bridge.generateConfig()  -> 在沙箱里生成内核 config.json
+ *   2. Bridge.connectVpn()      -> startVpnExtensionAbility + connectServiceExtensionAbility
+ *   3. Bridge.startCore()       -> 由扩展进程拉起 Xray/sing-box
+ *   4. TrafficMonitor 订阅 VPN_TRAFFIC 刷新速率/累计流量
+ * 断开流程按 3 -> 2 的顺序反向执行。
+ *
+ * MOCK 模式下 1~3 由 Bridge 内部模拟，4 由本文件用定时器产生模拟流量，
+ * 从而让 UI 的「连接 / 速率 / 累计流量」在没有内核时也是可见、可验证的。
+ */
+import { common } from '@kit.AbilityKit';
+import { ConnectionState, emptyTrafficStats, RoutingMode, TrafficStats } from '../model/Types';
+import { ServerNode } from '../model/ServerNode';
+import { Bridge, ConfigPathResult, MOCK_BRIDGE, StartCoreResult } from '../core/Bridge';
+import { TrafficMonitor } from '../core/TrafficMonitor';
+import { Logger } from '../utils/Logger';
+import { nodeViewModel } from './NodeViewModel';
+import { settingsViewModel } from './SettingsViewModel';
+
+const TAG: string = 'ConnectionViewModel';
+/** MOCK 流量刷新间隔（毫秒） */
+const MOCK_TICK_MS: number = 1000;
+
+/** 连接页 ViewModel */
+@ObservedV2
+export class ConnectionViewModel {
+  /** 连接状态机 */
+  @Trace state: ConnectionState = ConnectionState.DISCONNECTED;
+  /** 实时流量统计 */
+  @Trace traffic: TrafficStats = emptyTrafficStats();
+  /** 当前路由模式（与 SettingsViewModel 同步） */
+  @Trace routingMode: RoutingMode = RoutingMode.RULE;
+  /** 内核版本（启动后由 Bridge 填充） */
+  @Trace coreVersion: string = '';
+  /** 最近一次错误信息 */
+  @Trace lastError: string = '';
+  /** 是否 MOCK 模式（首页横幅） */
+  @Trace mockMode: boolean = MOCK_BRIDGE;
+
+  /** VPN 扩展连接 id；-1 表示未连接 */
+  private connectionId: number = -1;
+  /** 当前用于连接的内核配置路径 */
+  private configPath: string = '';
+  private assetPath: string = '';
+  private mockTimerId: number = -1;
+  private trafficBound: boolean = false;
+
+  /** 幂等初始化 */
+  init(): void {
+    if (this.trafficBound) {
+      return;
+    }
+    this.trafficBound = true;
+    this.routingMode = settingsViewModel.routingMode;
+    this.bindTraffic();
+    this.refreshCoreVersion();
+  }
+
+  /** 订阅流量事件 */
+  private bindTraffic(): void {
+    TrafficMonitor.start((stats: TrafficStats) => {
+      this.traffic = stats;
+    });
+    this.traffic = TrafficMonitor.latest();
+  }
+
+  /** 拉取内核版本（Mock 下也能拿到占位版本，便于 UI 展示） */
+  async refreshCoreVersion(): Promise<void> {
+    const version: string = await Bridge.version();
+    if (version.length > 0) {
+      this.coreVersion = version;
+      settingsViewModel.setCoreVersion(version);
+    }
+  }
+
+  /** 当前选中节点 */
+  currentNode(): ServerNode | undefined {
+    return nodeViewModel.selectedNode();
+  }
+
+  /** 是否处于「已连接」 */
+  isConnected(): boolean {
+    return this.state === ConnectionState.CONNECTED;
+  }
+
+  /** 是否处于过渡态（连接中/断开中），UI 据此禁用按钮 */
+  isBusy(): boolean {
+    return this.state === ConnectionState.CONNECTING || this.state === ConnectionState.DISCONNECTING;
+  }
+
+  /** 连接 / 断开 的统一切换入口（首页大按钮直接调用） */
+  async toggle(context: common.UIAbilityContext | undefined): Promise<void> {
+    if (this.isBusy()) {
+      return;
+    }
+    if (this.isConnected() || this.state === ConnectionState.ERROR) {
+      await this.disconnect(context);
+    } else {
+      await this.connect(context);
+    }
+  }
+
+  /** 建立连接 */
+  async connect(context: common.UIAbilityContext | undefined): Promise<void> {
+    if (this.isBusy() || this.isConnected()) {
+      return;
+    }
+    const node: ServerNode | undefined = this.currentNode();
+    if (node === undefined) {
+      this.lastError = 'no-node-selected';
+      Logger.warn(TAG, 'connect skipped: no node selected');
+      return;
+    }
+    this.lastError = '';
+    this.transition(ConnectionState.CONNECTING);
+    try {
+      const settings = settingsViewModel.snapshot();
+      const generated: ConfigPathResult = await Bridge.generateConfig(
+        node.id,
+        settings.routingMode.toString(),
+        ''
+      );
+      this.configPath = generated.configPath;
+      this.assetPath = generated.assetPath;
+
+      if (context !== undefined) {
+        this.connectionId = await Bridge.connectVpn(context, this.configPath, this.assetPath);
+      } else {
+        Logger.warn(TAG, 'connect without UIAbilityContext: VPN extension not started');
+      }
+
+      const started: StartCoreResult = await Bridge.startCore(this.configPath, this.assetPath);
+      if (started.pid <= 0) {
+        this.lastError = 'start-core-failed';
+        this.transition(ConnectionState.ERROR);
+        return;
+      }
+      await this.refreshCoreVersion();
+      this.transition(ConnectionState.CONNECTED);
+      this.startMockTrafficIfNeeded();
+      Logger.info(TAG, 'connected to ' + node.remarks + ' (pid=' + started.pid.toString() + ')');
+    } catch (error) {
+      this.lastError = Logger.describe(error as Object);
+      this.transition(ConnectionState.ERROR);
+      Logger.error(TAG, 'connect failed: ' + this.lastError);
+    }
+  }
+
+  /** 断开连接 */
+  async disconnect(context: common.UIAbilityContext | undefined): Promise<void> {
+    if (this.state === ConnectionState.DISCONNECTED || this.state === ConnectionState.DISCONNECTING) {
+      return;
+    }
+    this.transition(ConnectionState.DISCONNECTING);
+    try {
+      this.stopMockTraffic();
+      await Bridge.stopCore();
+      if (context !== undefined && this.connectionId >= 0) {
+        await Bridge.disconnectVpn(context, this.connectionId);
+      }
+      this.connectionId = -1;
+      this.traffic = emptyTrafficStats();
+      this.transition(ConnectionState.DISCONNECTED);
+      Logger.info(TAG, 'disconnected');
+    } catch (error) {
+      this.lastError = Logger.describe(error as Object);
+      this.transition(ConnectionState.ERROR);
+      Logger.error(TAG, 'disconnect failed: ' + this.lastError);
+    }
+  }
+
+  /** 同步路由模式（首页/设置页都可切换） */
+  setRoutingMode(mode: RoutingMode): void {
+    this.routingMode = mode;
+    settingsViewModel.setRoutingMode(mode);
+    Logger.info(TAG, 'routing mode -> ' + mode.toString());
+  }
+
+  /** 状态迁移 + 日志 */
+  private transition(next: ConnectionState): void {
+    if (this.state === next) {
+      return;
+    }
+    Logger.info(TAG, 'state ' + this.state.toString() + ' -> ' + next.toString());
+    this.state = next;
+  }
+
+  // -------------------------------------------------------------------------
+  // MOCK 流量：内核未接入时让「速率 / 累计」也有可观察的变化
+  // -------------------------------------------------------------------------
+
+  private startMockTrafficIfNeeded(): void {
+    if (!MOCK_BRIDGE || this.mockTimerId >= 0) {
+      return;
+    }
+    this.mockTimerId = setInterval(() => {
+      const previous: TrafficStats = this.traffic;
+      const speedUp: number = 20 * 1024 + Math.floor(Math.random() * 180 * 1024);
+      const speedDown: number = 120 * 1024 + Math.floor(Math.random() * 1800 * 1024);
+      const stats: TrafficStats = {
+        speedUp: speedUp,
+        speedDown: speedDown,
+        totalUp: previous.totalUp + speedUp,
+        totalDown: previous.totalDown + speedDown,
+        updatedAt: Date.now()
+      };
+      TrafficMonitor.publish(stats);
+    }, MOCK_TICK_MS);
+  }
+
+  private stopMockTraffic(): void {
+    if (this.mockTimerId < 0) {
+      return;
+    }
+    clearInterval(this.mockTimerId);
+    this.mockTimerId = -1;
+  }
+}
+
+/** 全局单例：首页与其它页面共享连接状态 */
+export const connectionViewModel: ConnectionViewModel = new ConnectionViewModel();

@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# Release-notes categorisation for GitHub's auto-generated notes
+# (`.github/release.yml` is read by "Generate release notes" and by
+# softprops/action-gh-release when `generate_release_notes: true`).
+#
+# Categories are matched against PR LABELS, not commit types: GitHub's
+# generator only sees labels. The label names below therefore mirror the
+# Conventional Commit types used in this repository (see CONTRIBUTING.md), and
+# .github/labeler-style automation is not configured -- a maintainer applies
+# them, or the `dependencies` label that Dependabot sets automatically.
+#
+# Schema reference: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+# ---------------------------------------------------------------------------
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+      - duplicate
+      - invalid
+      - wontfix
+  categories:
+    - title: '⚠️ 破坏性变更'
+      labels:
+        - breaking
+    - title: '🚀 新功能'
+      labels:
+        - feat
+        - enhancement
+    - title: '🐛 缺陷修复'
+      labels:
+        - fix
+        - bug
+    - title: '⚡ 性能优化'
+      labels:
+        - perf
+    - title: '♻️ 重构'
+      labels:
+        - refactor
+    - title: '📦 构建与依赖'
+      labels:
+        - build
+        - dependencies
+    - title: '🔧 CI 与工程化'
+      labels:
+        - ci
+    - title: '🧪 测试'
+      labels:
+        - test
+    - title: '📝 文档'
+      labels:
+        - docs
+        - documentation
+    - title: '其他变更'
+      labels:
+        - '*'

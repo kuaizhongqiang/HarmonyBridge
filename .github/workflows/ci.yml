@@ -1,0 +1,199 @@
+# ---------------------------------------------------------------------------
+# HarmonyBridge CI.
+#
+# Design rule for this repository: a workflow must never pretend to have
+# produced something it did not. There is no HarmonyOS SDK, no signing material
+# and no device on GitHub-hosted runners, so a signed HAP cannot be built here.
+# What CAN run on a hosted runner is everything that has nothing to do with the
+# HarmonyOS toolchain:
+#
+#   repo-hygiene      tracked-file gate (forbidden artifacts, credential-looking
+#                     strings, submodule integrity)          -- windows-latest
+#   conventional-pr   PR title must follow Conventional Commits  -- ubuntu-latest
+#   manifests         JSON5/JSON syntax + cross-manifest sanity   -- ubuntu-latest
+#   build-hap         DISABLED (`if: false`). Needs a self-hosted runner with
+#                     DevEco Studio + signing material; see the comment on that
+#                     job and docs/design/ci.md section 4.
+#
+# The HAP build is deferred rather than faked. See docs/design/ci.md.
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main, master]
+  # Manual trigger. Useful to re-run the cheap gates on demand, and it is the
+  # dispatch entry point for the build-hap job below.
+  # NOTE: GitHub does not support job-level `workflow_dispatch`; dispatching
+  # runs every job in this file, and build-hap stays guarded by `if: false`.
+  workflow_dispatch:
+
+# Least privilege by default; jobs widen only what they need.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Repository hygiene. Runs on Windows because scripts/verify-repo.ps1 is the
+  # authoritative implementation (this project is authored on Windows) and
+  # windows-latest ships pwsh 7 out of the box. The bash twin exists for Linux
+  # contributors; it is exercised by the local pre-commit hook instead of here,
+  # so that a rule can only ever disagree with itself in one direction.
+  # -------------------------------------------------------------------------
+  repo-hygiene:
+    name: repo hygiene (verify-repo.ps1)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # verify-repo.ps1 reads the index (ls-files -s, grep --cached), not
+          # history, so a shallow checkout is enough.
+          fetch-depth: 1
+          # No network and no reference tree needed: the gate only checks that
+          # third_party/v2rayN is a mode-160000 gitlink in the index.
+          submodules: false
+
+      - name: Repository hygiene gate
+        shell: pwsh
+        run: ./scripts/verify-repo.ps1
+
+  # -------------------------------------------------------------------------
+  # PR title must be a Conventional Commit. This is the same rule the
+  # commit-msg hook enforces locally, applied where nobody can bypass it.
+  #
+  # Triggered by `pull_request` (not `pull_request_target`): the action only
+  # reads the PR title, so it needs no token beyond the default, and running it
+  # on the base-commit context means no fork code is ever checked out or
+  # executed. `pull-requests: read` is enough; the action writes no comments.
+  # -------------------------------------------------------------------------
+  conventional-pr:
+    name: conventional PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Validate the PR title
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+          # A bare "feat: " with nothing after the colon is not a message.
+          subjectPattern: '.+'
+          subjectPatternError: |
+            PR 标题在 ":" 之后必须有描述，例如 "feat(vpn): 支持 TUN 回退"。
+          # Catches the common squash-merge mistake of committing a single
+          # commit's own (possibly non-conventional) message.
+          validateSingleCommit: true
+
+  # -------------------------------------------------------------------------
+  # Manifest validation. Pure Node standard library, no network, no install
+  # step -- see scripts/validate-json5.mjs for why the JSON5 parser is
+  # hand-rolled (hvigor would only tell you after a full, SDK-dependent build).
+  # -------------------------------------------------------------------------
+  manifests:
+    name: manifest syntax + sanity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Show the Node version
+        run: node --version
+
+      - name: Validate JSON/JSON5 manifests
+        run: node scripts/validate-json5.mjs
+
+  # -------------------------------------------------------------------------
+  # DISABLED BY DEFAULT (`if: false`), because it cannot succeed as written.
+  #
+  # Producing a HAP needs all of:
+  #   * DevEco Studio 26.0 (or a compatible install) containing
+  #     tools/hvigor/bin/hvigorw and tools/ohpm/bin/ohpm
+  #   * the HarmonyOS SDK (build-profile.json5 asks for API 24 compatibility,
+  #     26.0.0 target) -- several GB, licence-gated download
+  #   * a signing configuration: a .p12 keystore, a .cer certificate and a
+  #     .p7b provisioning profile, plus their passwords, wired into
+  #     build-profile.json5 signingConfigs or injected at build time
+  #   * hap-sign-tool.jar (SDK toolchains/lib) and a JBR/JDK
+  #   * for the ohosTest suite only: a connected device or emulator
+  #
+  # None of that exists on GitHub-hosted runners, and none of it can be
+  # committed to this repository (see .gitignore, and the licensing note in
+  # CONTRIBUTING.md). `if: false` therefore skips the job entirely. The moment
+  # the guard is removed, this job targets a self-hosted runner label that does
+  # not exist by default, so it waits for a runner instead of silently
+  # succeeding -- and its first step is a hard `exit 1` with an actionable
+  # message. Provisioning a runner and deleting the `if:` guard is the intended
+  # activation step; see docs/design/ci.md section 4.
+  # -------------------------------------------------------------------------
+  build-hap:
+    name: build HAP (self-hosted, manual)
+    if: false
+    runs-on: [self-hosted, harmonyos, windows]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Report that this job is not provisioned yet
+        shell: pwsh
+        run: |
+          Write-Host '::error::build-hap is intentionally disabled.'
+          Write-Host 'A self-hosted runner with DevEco Studio + SDK + signing material'
+          Write-Host 'is required. See docs/design/ci.md -> "自托管 HarmonyOS runner".'
+          exit 1
+
+      # TODO(setup): replace the step above with the real pipeline, which is
+      # expected to look like this once a runner exists.
+      #
+      # - name: Environment check
+      #   shell: pwsh
+      #   run: ./scripts/check-env.ps1 -RequireJava
+      #
+      # - name: Build the native proxy core
+      #   shell: pwsh
+      #   run: ./scripts/build-core.ps1      # owned by the native workstream
+      #
+      # - name: Assemble the unsigned HAP
+      #   shell: pwsh
+      #   run: |
+      #     & "$env:DEVECO_HOME\tools\hvigor\bin\hvigorw.bat" `
+      #         --mode module -p product=default -p buildMode=release assembleHap --no-daemon
+      #
+      # - name: Upload the unsigned HAP
+      #   uses: actions/upload-artifact@v7
+      #   with:
+      #     name: harmonybridge-unsigned-hap
+      #     path: entry/build/default/outputs/**/*.hap
+      #     if-no-files-found: error

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# HarmonyBridge commit-msg hook -- enforces Conventional Commits.
+#
+# Accepted header shape:
+#     <type>[(<scope>)][!]: <description>
+# with type in feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert,
+# a non-empty description, and a header of at most 100 characters.
+#
+# Let through, as Git itself generates them:
+#   * `Merge ...` and `Revert ...`
+#   * `fixup! ...` and `squash! ...` (git commit --fixup / --squash)
+# A wholly empty message is also allowed through: that is
+# `git commit --amend --no-edit`, and git itself rejects a truly empty message.
+#
+# Installed via: scripts/install-hooks.ps1  (sets core.hooksPath=.githooks)
+# ---------------------------------------------------------------------------
+set -u
+
+commit_msg_file="${1:-}"
+if [ -z "$commit_msg_file" ] || [ ! -f "$commit_msg_file" ]; then
+    echo "commit-msg: no commit message file supplied; skipping." >&2
+    exit 0
+fi
+
+# Strip comment lines (core.commentChar, default '#'), drop blank lines, take
+# the first surviving line as the header, then trim surrounding whitespace --
+# without that last step "feat: " (a type and colon with nothing after it)
+# would sail through the `[ ]*.+` check on the strength of its trailing space.
+header="$(grep -v '^#' "$commit_msg_file" | sed -e '/^[[:space:]]*$/d' | head -n 1 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+if [ -z "$header" ]; then
+    exit 0
+fi
+
+case "$header" in
+    Merge\ *|Revert\ *|fixup!\ *|squash!\ *)
+        exit 0
+        ;;
+esac
+
+types='feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert'
+# The description must contain at least one character. Trailing whitespace was
+# already trimmed above, so `.+` is exact here.
+pattern="^(${types})(\([^()]+\))?!?:[ ]*.+"
+max_header_length=100
+
+if ! printf '%s\n' "$header" | grep -Eq "$pattern"; then
+    {
+        echo ""
+        echo "  ✖ commit-msg: 提交信息不符合 Conventional Commits 规范。"
+        echo ""
+        echo "    实际: $header"
+        echo "    期望: <type>[(<scope>)][!]: <description>"
+        echo "    类型: feat fix docs style refactor perf test build ci chore revert"
+        echo ""
+        echo "    示例:"
+        echo "      feat(vpn): 新增 TUN 网卡回退路径"
+        echo "      fix(core): 退出时不再残留 xray 进程"
+        echo "      chore(deps)!: 移除未使用的 hypium mock"
+        echo ""
+        echo "    详见 CONTRIBUTING.md ->「提交信息规范」。"
+        echo ""
+    } >&2
+    exit 1
+fi
+
+if [ "${#header}" -gt "$max_header_length" ]; then
+    {
+        echo ""
+        echo "  ✖ commit-msg: 标题长度 ${#header} 字符，超过上限 ${max_header_length}。"
+        echo "    请把细节移到正文（用空行分隔标题与正文）。"
+        echo ""
+    } >&2
+    exit 1
+fi
+
+exit 0

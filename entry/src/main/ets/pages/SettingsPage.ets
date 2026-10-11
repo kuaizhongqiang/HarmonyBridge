@@ -1,0 +1,432 @@
+/**
+ * SettingsPage.ets
+ * 设置页。分组对齐 v2rayN 的 OptionSettingWindow 中在 HarmonyOS 端有意义的项：
+ *   路由（全局/规则/直连、绕过大陆）、VPN/TUN（TUN、MTU、IPv6、允许局域网）、
+ *   DNS 与嗅探、分应用代理（trusted/blocked applications）、日志、关于。
+ * 所有改动都直接写回 SettingsViewModel，跨页面共享。
+ */
+import { bundleManager } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { AppProxyMode, LogLevel, RoutingMode } from '../model/Types';
+import { settingsViewModel, SettingsViewModel } from '../viewmodel/SettingsViewModel';
+import { connectionViewModel } from '../viewmodel/ConnectionViewModel';
+import { logViewModel } from '../viewmodel/LogViewModel';
+import { Dimens, FontSizes, Radii } from '../constants/Dimens';
+import { Theme } from '../constants/Theme';
+import { PROJECT_URL } from '../constants/Common';
+import { MTU_MAX, MTU_MIN } from '../model/AppSettings';
+import { Routes } from '../constants/Routes';
+import { PageHeader } from '../components/PageHeader';
+import { NavigationBar } from '../components/NavigationBar';
+import { SettingGroupTitle, SettingSwitchRow, SettingTextRow, SettingValueRow } from '../components/SettingRow';
+import { OptionPickerDialog, PickerKind } from '../components/OptionPickerDialog';
+import { stringOf } from '../utils/TextFormat';
+import { resourceManager } from '@kit.LocalizationKit';
+
+@Entry
+@ComponentV2
+struct SettingsPage {
+  @Local vm: SettingsViewModel = settingsViewModel;
+  @Local pickerTitle: string = '';
+  @Local pickerSelectedKey: string = '';
+  @Local pickerKind: string = PickerKind.ROUTING;
+  /** 选择项文案（在 aboutToAppear 里按当前语言求值一次；语言运行中变更会重建页面） */
+  @Local pickerLabels: string[] = [];
+
+  private pickerController: CustomDialogController = new CustomDialogController({
+    builder: OptionPickerDialog({
+      title: this.pickerTitle,
+      selectedKey: this.pickerSelectedKey,
+      kind: this.pickerKind,
+      labels: this.pickerLabels,
+      onPick: (key: string) => {
+        this.applyPick(key);
+      }
+    }),
+    autoCancel: true,
+    customStyle: true
+  });
+
+  aboutToAppear(): void {
+    this.vm.init();
+    this.loadAppVersion();
+    this.loadPickerLabels();
+  }
+
+  /** 预取三类选择器的文案（顺序与对话框内的枚举顺序一致） */
+  private loadPickerLabels(): void {
+    const options: string[] = [
+      this.text('settings_routing_global'),
+      this.text('settings_routing_rule'),
+      this.text('settings_routing_direct'),
+      this.text('settings_app_mode_off'),
+      this.text('settings_app_mode_allow'),
+      this.text('settings_app_mode_block'),
+      this.text('settings_log_level_debug'),
+      this.text('settings_log_level_info'),
+      this.text('settings_log_level_warn'),
+      this.text('settings_log_level_error')
+    ];
+    this.pickerLabels = options;
+    // 首次渲染前资源管理器可能尚未就绪：下一帧再补一次，保证弹窗文案不为空
+    setTimeout(() => {
+      if (this.pickerLabels.length > 0 && this.pickerLabels[0].length > 0) {
+        return;
+      }
+      const retry: string[] = [
+        this.text('settings_routing_global'),
+        this.text('settings_routing_rule'),
+        this.text('settings_routing_direct'),
+        this.text('settings_app_mode_off'),
+        this.text('settings_app_mode_allow'),
+        this.text('settings_app_mode_block'),
+        this.text('settings_log_level_debug'),
+        this.text('settings_log_level_info'),
+        this.text('settings_log_level_warn'),
+        this.text('settings_log_level_error')
+      ];
+      this.pickerLabels = retry;
+    }, 0);
+  }
+
+  /** 从 bundleManager 读取真实的应用版本号 */
+  private loadAppVersion(): void {
+    try {
+      const info: bundleManager.BundleInfo =
+        bundleManager.getBundleInfoForSelfSync(bundleManager.BundleFlag.GET_BUNDLE_INFO_DEFAULT);
+      if (info.versionName !== undefined && info.versionName.length > 0) {
+        this.vm.appVersion = info.versionName;
+      }
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      this.vm.appVersion = '1.0.0';
+      logViewModel.append(LogLevel.WARN, 'SettingsPage', 'read bundle info failed: ' + err.code.toString());
+    }
+  }
+
+  private manager(): resourceManager.ResourceManager | undefined {
+    return this.getUIContext().getHostContext()?.resourceManager;
+  }
+
+  private text(name: string): string {
+    const mgr = this.manager();
+    if (mgr === undefined) {
+      return '';
+    }
+    return stringOf(mgr, name);
+  }
+
+  private routingModeText(): string {
+    if (this.vm.routingMode === RoutingMode.GLOBAL) {
+      return this.text('settings_routing_global');
+    }
+    if (this.vm.routingMode === RoutingMode.DIRECT) {
+      return this.text('settings_routing_direct');
+    }
+    return this.text('settings_routing_rule');
+  }
+
+  private appProxyModeText(): string {
+    if (this.vm.appProxyMode === AppProxyMode.ALLOW_LIST) {
+      return this.text('settings_app_mode_allow');
+    }
+    if (this.vm.appProxyMode === AppProxyMode.BLOCK_LIST) {
+      return this.text('settings_app_mode_block');
+    }
+    return this.text('settings_app_mode_off');
+  }
+
+  private openRoutingPicker(): void {
+    this.pickerKind = 'routing';
+    this.pickerTitle = this.text('settings_routing_mode');
+    this.pickerSelectedKey = this.vm.routingMode.toString();
+    this.pickerController.open();
+  }
+
+  private openAppProxyPicker(): void {
+    this.pickerKind = 'appProxy';
+    this.pickerTitle = this.text('settings_app_proxy_mode');
+    this.pickerSelectedKey = this.vm.appProxyMode.toString();
+    this.pickerController.open();
+  }
+
+  private openLogLevelPicker(): void {
+    this.pickerKind = 'logLevel';
+    this.pickerTitle = this.text('settings_log_level');
+    this.pickerSelectedKey = this.vm.logLevel.toString();
+    this.pickerController.open();
+  }
+
+  /** 选择器回调：按当前类别写回对应字段 */
+  private applyPick(key: string): void {
+    if (this.pickerKind === 'routing') {
+      if (key === RoutingMode.GLOBAL.toString()) {
+        this.vm.setRoutingMode(RoutingMode.GLOBAL);
+        connectionViewModel.setRoutingMode(RoutingMode.GLOBAL);
+      } else if (key === RoutingMode.DIRECT.toString()) {
+        this.vm.setRoutingMode(RoutingMode.DIRECT);
+        connectionViewModel.setRoutingMode(RoutingMode.DIRECT);
+      } else {
+        this.vm.setRoutingMode(RoutingMode.RULE);
+        connectionViewModel.setRoutingMode(RoutingMode.RULE);
+      }
+      return;
+    }
+    if (this.pickerKind === 'appProxy') {
+      if (key === AppProxyMode.ALLOW_LIST.toString()) {
+        this.vm.setAppProxyMode(AppProxyMode.ALLOW_LIST);
+      } else if (key === AppProxyMode.BLOCK_LIST.toString()) {
+        this.vm.setAppProxyMode(AppProxyMode.BLOCK_LIST);
+      } else {
+        this.vm.setAppProxyMode(AppProxyMode.OFF);
+      }
+      return;
+    }
+    if (key === LogLevel.DEBUG.toString()) {
+      this.vm.setLogLevel(LogLevel.DEBUG);
+    } else if (key === LogLevel.WARN.toString()) {
+      this.vm.setLogLevel(LogLevel.WARN);
+    } else if (key === LogLevel.ERROR.toString()) {
+      this.vm.setLogLevel(LogLevel.ERROR);
+    } else {
+      this.vm.setLogLevel(LogLevel.INFO);
+    }
+  }
+
+  build() {
+    Column() {
+      PageHeader({ title: $r('app.string.settings_title'), showBack: false })
+
+      Scroll() {
+        Column() {
+          // ---------------- 路由 ----------------
+          SettingGroupTitle({ title: $r('app.string.settings_group_routing') })
+          this.Card(() => {
+            SettingValueRow({
+              title: $r('app.string.settings_routing_mode'),
+              value: this.routingModeText(),
+              onTap: () => {
+                this.openRoutingPicker();
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingSwitchRow({
+              title: $r('app.string.settings_bypass_cn'),
+              checked: this.vm.bypassChina,
+              onToggle: (value: boolean) => {
+                this.vm.setBypassChina(value);
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingSwitchRow({
+              title: $r('app.string.settings_custom_rules'),
+              checked: this.vm.customRulesEnabled,
+              onToggle: (value: boolean) => {
+                this.vm.setCustomRulesEnabled(value);
+              }
+            })
+          })
+
+          // ---------------- VPN / TUN ----------------
+          SettingGroupTitle({ title: $r('app.string.settings_group_tun') })
+          this.Card(() => {
+            SettingSwitchRow({
+              title: $r('app.string.settings_tun_enabled'),
+              checked: this.vm.tunEnabled,
+              onToggle: (value: boolean) => {
+                this.vm.setTunEnabled(value);
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingValueRow({
+              title: $r('app.string.settings_mtu'),
+              value: this.vm.mtu.toString(),
+              clickable: false
+            })
+            Slider({
+              value: this.vm.mtu,
+              min: MTU_MIN,
+              max: MTU_MAX,
+              step: 4,
+              style: SliderStyle.OutSet
+            })
+              .selectedColor(Theme.brand)
+              .width('100%')
+              .onChange((value: number) => {
+                this.vm.setMtu(value);
+              })
+            Divider().color(Theme.divider)
+            SettingSwitchRow({
+              title: $r('app.string.settings_ipv6'),
+              checked: this.vm.ipv6Enabled,
+              onToggle: (value: boolean) => {
+                this.vm.setIpv6Enabled(value);
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingSwitchRow({
+              title: $r('app.string.settings_allow_lan'),
+              checked: this.vm.allowLan,
+              onToggle: (value: boolean) => {
+                this.vm.setAllowLan(value);
+              }
+            })
+          })
+
+          // ---------------- DNS / 嗅探 ----------------
+          SettingGroupTitle({ title: $r('app.string.settings_group_dns') })
+          this.Card(() => {
+            SettingTextRow({
+              title: $r('app.string.settings_dns_remote'),
+              hint: $r('app.string.settings_dns_hint'),
+              value: this.vm.remoteDns,
+              onValueChange: (value: string) => {
+                this.vm.setRemoteDns(value);
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingTextRow({
+              title: $r('app.string.settings_dns_direct'),
+              hint: $r('app.string.settings_dns_hint'),
+              value: this.vm.directDns,
+              onValueChange: (value: string) => {
+                this.vm.setDirectDns(value);
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingSwitchRow({
+              title: $r('app.string.settings_sniffing'),
+              checked: this.vm.sniffingEnabled,
+              onToggle: (value: boolean) => {
+                this.vm.setSniffingEnabled(value);
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingSwitchRow({
+              title: $r('app.string.settings_sniffing_dest'),
+              checked: this.vm.sniffingOverrideDestination,
+              onToggle: (value: boolean) => {
+                this.vm.setSniffingOverride(value);
+              }
+            })
+          })
+
+          // ---------------- 分应用代理 ----------------
+          SettingGroupTitle({ title: $r('app.string.settings_group_app') })
+          this.Card(() => {
+            SettingValueRow({
+              title: $r('app.string.settings_app_proxy_mode'),
+              value: this.appProxyModeText(),
+              onTap: () => {
+                this.openAppProxyPicker();
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingTextRow({
+              title: $r('app.string.settings_app_list'),
+              hint: $r('app.string.settings_app_list_hint'),
+              value: this.vm.appProxyListText,
+              onValueChange: (value: string) => {
+                this.vm.setAppProxyListText(value);
+              }
+            })
+          })
+
+          // ---------------- 日志 ----------------
+          SettingGroupTitle({ title: $r('app.string.settings_group_log') })
+          this.Card(() => {
+            SettingValueRow({
+              title: $r('app.string.settings_log_level'),
+              value: this.vm.logLevel.toString().toUpperCase(),
+              onTap: () => {
+                this.openLogLevelPicker();
+              }
+            })
+            Divider().color(Theme.divider)
+            SettingSwitchRow({
+              title: $r('app.string.settings_log_to_file'),
+              checked: this.vm.logToFile,
+              onToggle: (value: boolean) => {
+                this.vm.setLogToFile(value);
+              }
+            })
+          })
+
+          // ---------------- 关于 ----------------
+          SettingGroupTitle({ title: $r('app.string.settings_group_about') })
+          this.Card(() => {
+            SettingValueRow({
+              title: $r('app.string.settings_about_app'),
+              value: this.vm.appVersion,
+              clickable: false
+            })
+            Divider().color(Theme.divider)
+            SettingValueRow({
+              title: $r('app.string.settings_about_core'),
+              value: this.vm.coreVersion.length > 0 ? this.vm.coreVersion : this.text('settings_about_core_unknown'),
+              clickable: false
+            })
+            Divider().color(Theme.divider)
+            SettingValueRow({
+              title: $r('app.string.settings_about_license'),
+              value: this.text('settings_about_license_value'),
+              clickable: false
+            })
+            Divider().color(Theme.divider)
+            SettingValueRow({
+              title: $r('app.string.settings_about_source'),
+              value: PROJECT_URL,
+              clickable: false
+            })
+          })
+
+          // ---------------- 保存 / 恢复默认 ----------------
+          Row({ space: Dimens.item }) {
+            Button($r('app.string.common_save'))
+              .fontSize(FontSizes.body)
+              .backgroundColor(Theme.brand)
+              .fontColor(Theme.textOnBrand)
+              .layoutWeight(1)
+              .enabled(this.vm.dirty)
+              .onClick(() => {
+                this.vm.save();
+              })
+            Button($r('app.string.common_reset_default'))
+              .fontSize(FontSizes.body)
+              .backgroundColor(Theme.surfaceAlt)
+              .fontColor(Theme.textPrimary)
+              .layoutWeight(1)
+              .onClick(() => {
+                this.vm.resetToDefault();
+              })
+          }
+          .width('100%')
+          .padding({ top: Dimens.card, bottom: Dimens.card })
+        }
+        .width('100%')
+        .padding({ left: Dimens.page, right: Dimens.page })
+      }
+      .layoutWeight(1)
+      .scrollBar(BarState.Off)
+      .align(Alignment.Top)
+
+      NavigationBar({ current: Routes.SETTINGS })
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(Theme.bg)
+  }
+
+  /** 统一分组卡片外观 */
+  @Builder
+  Card(content: () => void) {
+    Column() {
+      content()
+    }
+    .width('100%')
+    .padding({ left: Dimens.card, right: Dimens.card })
+    .backgroundColor(Theme.surface)
+    .borderRadius(Radii.card)
+    .margin({ bottom: Dimens.tight })
+  }
+}

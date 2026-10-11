@@ -1,0 +1,142 @@
+name: Bug 报告
+description: 报告一个可复现的缺陷（崩溃、连接失败、界面异常等）
+title: '[Bug] '
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量把环境信息填全 —— 没有环境信息的缺陷报告通常无法复现。
+
+        ⚠️ 请勿在本 issue 中粘贴真实的订阅链接、节点地址、UUID、密码或私钥。
+        日志里的敏感字段请先脱敏（用 `***` 替换）。
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索过现有 issue，没有重复
+          required: true
+        - label: 我使用的是最近一次提交或最新 Release 构建的版本
+          required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题概述
+      description: 一句话说清楚发生了什么
+      placeholder: 例如：开启 VPN 后 10 秒左右连接自动断开
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序写清楚每一步，越具体越好
+      placeholder: |
+        1. 打开应用，进入「服务器」页
+        2. 选择一个 vmess 节点
+        3. 点击「连接」
+        4. 观察约 10 秒后状态变为「已断开」
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果
+      description: 包括错误提示原文、崩溃栈等
+    validations:
+      required: true
+
+  - type: input
+    id: deveco
+    attributes:
+      label: DevEco Studio 版本
+      description: DevEco Studio → Help → About，或安装目录下的 build.txt
+      placeholder: 例如 26.0.0.851 (DS-261.23567.138.36.2600851)
+    validations:
+      required: true
+
+  - type: input
+    id: sdk
+    attributes:
+      label: SDK / API 版本
+      description: 根目录 build-profile.json5 里的 compatibleSdkVersion 与 targetSdkVersion
+      placeholder: 例如 compatibleSdkVersion=6.1.1(24)，targetSdkVersion=26.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: device
+    attributes:
+      label: 运行环境
+      description: 真机 / 模拟器 / 未运行
+      options:
+        - 真机
+        - 模拟器
+        - 未运行（仅编译期问题）
+        - 其他（在下方说明）
+    validations:
+      required: true
+
+  - type: input
+    id: device_detail
+    attributes:
+      label: 设备或模拟器详情
+      description: 型号 + HarmonyOS 版本；模拟器写清镜像版本
+      placeholder: 例如 Mate 60 Pro / HarmonyOS 6.0.0，或 模拟器 API 24
+    validations:
+      required: false
+
+  - type: input
+    id: core_version
+    attributes:
+      label: 核心版本
+      description: 原生代理核心（Xray-core）的版本；未涉及核心时写「未涉及」
+      placeholder: 例如 xray-core 1.8.x / 未涉及
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志
+      description: |
+        - 应用日志：DevEco Studio 的 Log 窗口（HiLog），或 `hdc hilog`
+        - 核心日志：核心自身的运行日志（如有）
+        请务必脱敏；日志很长时用代码块包裹，或附 gist 链接。
+      render: shell
+      placeholder: |
+        ```text
+        01-01 12:00:00.000  1234  1234 I A00000/HarmonyBridge: ...
+        ```
+    validations:
+      required: true
+
+  - type: input
+    id: verify_repo
+    attributes:
+      label: 本机 `scripts/check-env.ps1` 结果
+      description: 若本机环境检查存在 FAIL 项，请贴出（否则写「全部通过」）
+      placeholder: '例如 VERDICT: READY (with warnings)'
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: 补充信息
+      description: 截图、录屏、修改过的本地配置、是否只在特定网络下出现等
+    validations:
+      required: false

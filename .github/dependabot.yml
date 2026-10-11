@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# Dependabot configuration.
+#
+# ACCURACY NOTE -- read before adding an ecosystem here:
+#   * `github-actions` is supported and is the only ecosystem this repository
+#     currently benefits from.
+#   * There is NO `ohpm` ecosystem. HarmonyOS dependencies live in
+#     oh-package.json5 / oh-package-lock.json5 and are resolved by ohpm, which
+#     Dependabot does not know about. Do not invent a `package-ecosystem: ohpm`
+#     entry: Dependabot rejects unknown ecosystems and the whole file stops
+#     being processed.
+#   * `npm` is NOT configured either: this repository has no package.json and
+#     no node_modules. The one JavaScript file (scripts/validate-json5.mjs) is
+#     deliberately dependency-free. Add an npm entry only when a package.json
+#     actually appears at the configured directory.
+#   * Gradle/Maven ecosystems are irrelevant here (HarmonyOS, not Android).
+#
+# ohpm upgrades are therefore a manual, reviewable chore: see CONTRIBUTING.md
+# ->「依赖升级」. A scheduled job that runs `ohpm update` and opens a PR is a
+# possible future addition, but it needs a HarmonyOS toolchain and so cannot
+# run on a GitHub-hosted runner -- see docs/design/ci.md.
+# ---------------------------------------------------------------------------
+version: 2
+updates:
+  # Keep the pinned workflow actions current. This is the only automated
+  # dependency surface that exists today.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '01:00'
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'ci'
+      include: scope
+    labels:
+      - dependencies
+      - ci
+    groups:
+      # One PR for the routine bumps, so version churn does not drown the
+      # review queue. `update-types` here restricts the group to minor/patch:
+      # a major bump can change runner requirements and deserves its own diff,
+      # so it is left out of the group and opened as an individual PR.
+      actions-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch

@@ -1,0 +1,116 @@
+# ---------------------------------------------------------------------------
+# EditorConfig -- https://editorconfig.org
+#
+# This file complements .gitattributes rather than duplicating it:
+#   * .gitattributes decides what is stored in Git (LF for text, and the LFS
+#     filters for large binaries). It is authoritative for line endings "at
+#     rest" and cannot be overridden by an editor config.
+#   * .editorconfig decides what an editor writes as you type. Where the two
+#     overlap, this file follows .gitattributes, so nothing gets rewritten on
+#     checkout: text stays LF, *.ps1/*.bat/*.cmd stay CRLF.
+#
+# Deliberately ASCII-only: it is read by every editor and by CI, and non-ASCII
+# punctuation here has already been damaged once by a PowerShell 5.1
+# Get-Content/Set-Content round trip (which reads UTF-8 as the ANSI code page).
+# ---------------------------------------------------------------------------
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+max_line_length = off
+
+# Markdown: two trailing spaces are a hard line break, so never strip them.
+[*.md]
+trim_trailing_whitespace = false
+
+# Makefiles require real tabs.
+[Makefile]
+indent_style = tab
+[{makefile,*.mk,*.make}]
+indent_style = tab
+
+# --- ArkTS / TypeScript / JS / JSON / YAML ----------------------------------
+[{*.ets,*.ts,*.mjs,*.js,*.cjs}]
+indent_style = space
+indent_size = 2
+
+[{*.json,*.json5}]
+indent_style = space
+indent_size = 2
+
+[{*.yml,*.yaml}]
+indent_style = space
+indent_size = 2
+
+# --- Native code ------------------------------------------------------------
+# Matches the existing 4-space style of entry/src/main/cpp.
+[{*.c,*.cc,*.cpp,*.cxx,*.h,*.hh,*.hpp,*.hxx}]
+indent_style = space
+indent_size = 4
+
+# gofmt uses tabs; `indent_size` is only a display width for editors.
+[{*.go,go.mod,go.sum}]
+indent_style = tab
+indent_size = 4
+
+[{*.cj,*.cangjie}]
+indent_style = space
+indent_size = 4
+
+# 2 spaces, following the existing entry/src/main/cpp/CMakeLists.txt.
+[{CMakeLists.txt,*.cmake}]
+indent_style = space
+indent_size = 2
+
+# --- Scripts ----------------------------------------------------------------
+# Bash/POSIX sh must be LF; .gitattributes enforces this too.
+[{*.sh,*.bash}]
+indent_style = space
+indent_size = 2
+
+# PowerShell: .gitattributes stores these as CRLF so cmd.exe and the legacy
+# Windows PowerShell host parse them correctly.
+[*.ps1]
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+[*.psm1]
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+
+# Windows batch files are CRLF by definition.
+[{*.bat,*.cmd}]
+end_of_line = crlf
+
+# --- Generated / vendored trees ---------------------------------------------
+# Never reformat generated lockfiles, dependencies, build output, or the
+# read-only reference submodule (which has its own repository, its own style,
+# and a GPL-3.0 licence -- see CONTRIBUTING.md).
+[{oh-package-lock.json5,package-lock.json,pnpm-lock.yaml}]
+indent_style = unset
+indent_size = unset
+trim_trailing_whitespace = unset
+
+[third_party/**]
+indent_style = unset
+indent_size = unset
+end_of_line = unset
+trim_trailing_whitespace = unset
+insert_final_newline = unset
+
+[oh_modules/**]
+indent_style = unset
+indent_size = unset
+trim_trailing_whitespace = unset
+
+[.hvigor/**]
+indent_style = unset
+indent_size = unset
+trim_trailing_whitespace = unset

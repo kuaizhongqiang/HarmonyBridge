@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Shared data file for scripts/verify-repo.ps1 and scripts/verify-repo.sh.
+#
+# Keep this file the SINGLE source of truth for what the repo hygiene gate
+# rejects, so the PowerShell and bash implementations cannot drift apart.
+#
+# Format (line based, deliberately dumb so both shells can parse it):
+#   # ...              comment / blank lines are ignored
+#   [artifacts]        section: tracked paths that must never be committed
+#   [secrets]          section: regexes scanned against tracked text files
+#
+# In [artifacts], a pattern starting with `/` is anchored at the repository
+# root; every other pattern matches at any depth (i.e. it behaves as if it
+# were prefixed with `**/`). `*` and `?` are shell-style wildcards.
+#
+# In [secrets], a pattern is an extended regular expression (ERE). ECMAScript
+# and .NET both accept the subset used here.
+# ---------------------------------------------------------------------------
+
+[artifacts]
+# Native / packaged build outputs. A ~30 MB .so per ABI must be produced from
+# source at build time, never committed (see .gitignore and docs/design/ci.md).
+*.so
+*.so.*
+*.hap
+*.hsp
+*.har
+
+# Signing material. Real certificates and private keys live outside the repo
+# (see docs/03-环境搭建.md -> "签名与证书").
+*.p12
+*.cer
+*.p7b
+*.keystore
+*.jks
+*.pem
+
+# Machine-specific IDE state that leaks absolute paths and SDK locations.
+local.properties
+/local.properties
+
+# Anything produced by hvigor/CMake/go into a `build` directory.
+*/build/*
+build/*
+
+[secrets]
+# Deliberately narrow, false-positive-tolerant heuristics. This is NOT an
+# entropy scanner: it only catches the classic provider prefixes, an explicit
+# private-key header, and Huawei-style AK/SK assignments. Anything fancier
+# belongs in a dedicated secret scanner running as its own CI job.
+AKIA[0-9A-Z]{16}
+ASIA[0-9A-Z]{16}
+sk-[A-Za-z0-9]{32,}
+ghp_[A-Za-z0-9]{36}
+github_pat_[A-Za-z0-9_]{22,}
+xox[baprs]-[A-Za-z0-9-]{10,}
+# NOTE: the private-key header pattern is split with `{1}` so that this file
+# (which is itself tracked and scanned) does not match its own rule.
+-----BEGIN {1}[A-Z ]*PRIVATE KEY{1}-----
+(accessKeyId|secretAccessKey|access_key_id|secret_access_key)[^0-9A-Za-z]{0,4}["'][A-Za-z0-9/+]{16,}["']

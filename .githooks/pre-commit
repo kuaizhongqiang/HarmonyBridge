@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# HarmonyBridge pre-commit hook.
+#
+# Rejects the commit when scripts/verify-repo.ps1 (or its bash twin) finds a
+# forbidden artifact staged for commit. Only the staged delta is inspected, so a
+# pre-existing problem elsewhere in the tree does not block unrelated work.
+#
+# Bypass with `git commit --no-verify` -- but note that CI runs the same gate
+# over the whole index, so a bypass will just move the failure later.
+#
+# Installed via: scripts/install-hooks.ps1  (sets core.hooksPath=.githooks)
+# ---------------------------------------------------------------------------
+set -u
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+if [ -z "$repo_root" ]; then
+    exit 0
+fi
+
+run_powershell_gate() {
+    local script="$1"
+    local ps_exe=""
+    if command -v pwsh >/dev/null 2>&1; then
+        ps_exe="pwsh"
+    elif command -v powershell >/dev/null 2>&1; then
+        ps_exe="powershell"
+    elif [ -x "/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" ]; then
+        ps_exe="/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    fi
+    [ -z "$ps_exe" ] && return 127
+    # Convert to a Windows path when we are on Git for Windows.
+    local win_script="$script"
+    if command -v cygpath >/dev/null 2>&1; then
+        win_script="$(cygpath -w "$script")"
+    fi
+    "$ps_exe" -NoProfile -ExecutionPolicy Bypass -File "$win_script" -RepoRoot "$(pwd)" -StagedOnly
+    return $?
+}
+
+if [ -f "$repo_root/scripts/verify-repo.ps1" ]; then
+    run_powershell_gate "$repo_root/scripts/verify-repo.ps1"
+    status=$?
+    if [ "$status" -eq 127 ]; then
+        echo "pre-commit: PowerShell not found; falling back to the bash gate." >&2
+    else
+        exit $status
+    fi
+fi
+
+if [ -x "$repo_root/scripts/verify-repo.sh" ]; then
+    "$repo_root/scripts/verify-repo.sh" --staged-only
+    exit $?
+fi
+
+if [ -f "$repo_root/scripts/verify-repo.sh" ]; then
+    bash "$repo_root/scripts/verify-repo.sh" --staged-only
+    exit $?
+fi
+
+echo "pre-commit: no verify-repo script found; skipping the repository hygiene gate." >&2
+exit 0

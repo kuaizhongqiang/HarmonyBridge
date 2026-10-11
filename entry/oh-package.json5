@@ -1,11 +1,14 @@
 {
   "name": "entry",
   "version": "1.0.0",
-  "description": "Please describe the basic information.",
+  "description": "HarmonyOS bridge front-end for the native proxy core.",
   "main": "",
   "author": "",
-  "license": "",
+  "license": "MIT",
   "dependencies": {
-    "libentry.so": "file:./src/main/cpp/types/libentry"
+    // NAPI bridge to the Go proxy core. Built from src/main/cpp by hvigor;
+    // the Go core itself (libcore.so) is a build artifact that lives in
+    // entry/libs/<abi>/ and is never committed. See entry/libs/README.md.
+    "libbridge.so": "file:./src/main/cpp/types/libbridge"
   }
 }

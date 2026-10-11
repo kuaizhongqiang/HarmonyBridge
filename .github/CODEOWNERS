@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# Default owners. Keep this file in sync with the areas that actually exist --
+# an entry for a path that does not exist is noise, and an omitted path falls
+# back to the default owner below anyway.
+#
+# See CONTRIBUTING.md for the review expectations, and docs/design/ci.md for
+# how CI maps to these areas.
+# ---------------------------------------------------------------------------
+
+# Fallback for everything not listed below.
+*                       @kuaizhongqiang
+
+# --- Application -----------------------------------------------------------
+# ArkTS UI, pages, view models, resources. Owned by the UI workstream.
+/entry/src/main/ets/        @kuaizhongqiang
+/entry/src/main/resources/  @kuaizhongqiang
+/entry/src/main/module.json5 @kuaizhongqiang
+/AppScope/                  @kuaizhongqiang
+
+# --- Native proxy core -----------------------------------------------------
+# Go core, C++/NAPI bridge, prebuilt-lib layout, the core build scripts.
+/entry/src/main/golang/     @kuaizhongqiang
+/entry/src/main/cpp/        @kuaizhongqiang
+/entry/libs/                @kuaizhongqiang
+/scripts/build-core.sh      @kuaizhongqiang
+/scripts/build-core.ps1     @kuaizhongqiang
+
+# --- Engineering / CI ------------------------------------------------------
+# Everything in this section is what the CI workstream owns. A change here can
+# weaken a gate for the whole repository, so it should not be self-approved.
+/.github/                   @kuaizhongqiang
+/.githooks/                 @kuaizhongqiang
+/scripts/                   @kuaizhongqiang
+/.editorconfig              @kuaizhongqiang
+/.gitattributes             @kuaizhongqiang
+/code-linter.json5          @kuaizhongqiang
+
+# --- Docs ------------------------------------------------------------------
+/docs/                      @kuaizhongqiang
+/CONTRIBUTING.md            @kuaizhongqiang
+
+# --- Licensing-sensitive --------------------------------------------------
+# The reference submodule must stay a gitlink. Touching .gitmodules, the root
+# LICENSE, or the dependency manifests is a licensing-relevant change and needs
+# a deliberate decision -- see CONTRIBUTING.md ->「许可证与第三方代码」.
+/.gitmodules                @kuaizhongqiang
+/LICENSE                    @kuaizhongqiang
+/oh-package.json5           @kuaizhongqiang
+/entry/oh-package.json5     @kuaizhongqiang

@@ -1,8 +1,39 @@
 {
   "color": [
-    {
-      "name": "start_window_background",
-      "value": "#FFFFFF"
-    }
+    { "name": "start_window_background", "value": "#FFFFFF" },
+
+    { "name": "app_bg", "value": "#F1F3F5" },
+    { "name": "app_surface", "value": "#FFFFFF" },
+    { "name": "app_surface_alt", "value": "#F7F8FA" },
+    { "name": "app_divider", "value": "#1A000000" },
+
+    { "name": "brand", "value": "#0A59F7" },
+    { "name": "brand_pressed", "value": "#0A3FC4" },
+    { "name": "brand_on", "value": "#FFFFFF" },
+    { "name": "brand_soft", "value": "#1A0A59F7" },
+
+    { "name": "text_primary", "value": "#E6000000" },
+    { "name": "text_secondary", "value": "#99000000" },
+    { "name": "text_tertiary", "value": "#61000000" },
+    { "name": "text_on_brand", "value": "#FFFFFF" },
+
+    { "name": "state_success", "value": "#1FA95C" },
+    { "name": "state_error", "value": "#E84026" },
+    { "name": "state_warning", "value": "#F0A020" },
+    { "name": "state_idle", "value": "#8C8C8C" },
+
+    { "name": "latency_fast", "value": "#1FA95C" },
+    { "name": "latency_medium", "value": "#F0A020" },
+    { "name": "latency_slow", "value": "#E84026" },
+    { "name": "latency_unknown", "value": "#8C8C8C" },
+    { "name": "latency_fast_bg", "value": "#1A1FA95C" },
+    { "name": "latency_medium_bg", "value": "#1AF0A020" },
+    { "name": "latency_slow_bg", "value": "#1AE84026" },
+    { "name": "latency_unknown_bg", "value": "#148C8C8C" },
+
+    { "name": "log_debug", "value": "#8C8C8C" },
+    { "name": "log_info", "value": "#0A59F7" },
+    { "name": "log_warn", "value": "#F0A020" },
+    { "name": "log_error", "value": "#E84026" }
   ]
 }

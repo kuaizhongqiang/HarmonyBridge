@@ -10,9 +10,13 @@
       "path": "./src/main/cpp/CMakeLists.txt",
       "arguments": "",
       "cppFlags": "",
+      // arm64-v8a only. The native core (libcore.so) is a Go c-shared library
+      // cross-compiled for aarch64-linux-ohos, so there is no x86_64 build of
+      // it and listing x86_64 here would make the simulator sync fail with a
+      // missing-libcore error rather than a clear message.
+      // See docs/design/core.md ("why arm64 only").
       "abiFilters": [
-        "arm64-v8a",
-        "x86_64"
+        "arm64-v8a"
       ]
     }
   },

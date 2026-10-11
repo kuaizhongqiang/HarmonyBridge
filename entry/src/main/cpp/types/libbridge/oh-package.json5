@@ -1,0 +1,9 @@
+{
+  "name": "libbridge.so",
+  "types": "./Index.d.ts",
+  "version": "1.0.0",
+  "description": "NAPI bridge from ArkTS to the native Go proxy core (libcore.so).",
+  "main": "",
+  "author": "",
+  "license": "Apache-2.0"
+}
