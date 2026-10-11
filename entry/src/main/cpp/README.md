@@ -1,7 +1,13 @@
 # libbridge.so —— ArkTS ↔ NAPI ↔ Go 调用链
 
-本目录是原生侧的**桥接层**。它自己不实现任何代理逻辑，只做三件事：
-解析入参、把请求转交给 Go 内核、把结果转成 JS 字符串。
+本目录是原生侧的**桥接层**。它对上层提供两个互不相干的调用面：
+
+1. **控制面**（`Invoke`）：解析入参、把请求转交给 Go 内核、把结果转成 JS 字符串。
+2. **数据面**（`Tun2socks*`，见下文"数据面"一节）：加载并驱动 tun2socks，把系统交给
+   扩展的 vNIC fd 接到 `127.0.0.1:<socksPort>` —— 也就是内核的本地 SOCKS 入站。
+
+它自己不实现任何代理逻辑，也没有 TCP/IP 栈：协议栈在 Xray-core 里，
+用户态 TCP/IP 栈在 hev-socks5-tunnel 里。
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -42,6 +48,31 @@ CMake 里**故意没有** `target_link_libraries(bridge ... libcore.so)`：
 `CMakeLists.txt` 里保留了 `-Wl,--allow-shlib-undefined`，因为 HarmonyOS 的
 native 模块默认以 `-z now` 链接，未解析符号会变成硬链接错误。
 
+## 数据面：tun2socks（libhevsocks5tun.so）
+
+冻结契约（`docs/design/ipc-contract.md` §2）规定数据面是
+`TUN fd → tun2socks → 127.0.0.1:<socksPort> → libcore.so`，**不是**把 fd 交给内核。
+
+实现用 `heiher/hev-socks5-tunnel`（**纯 C、MIT**）。选它的两个理由：
+
+- 纯 C → 不需要 Go 工具链 fork，绕开 B2（Go 没有 `GOOS=ohos` 目标）；
+- MIT → 仓库保持 MIT + Xray-core(MPL-2.0) 的边界，GPL 版会失守。
+
+它和 `libcore.so` 一样用 `dlopen`/`dlsym` **惰性**加载，原因也相同：
+
+- 没有它也能构建、能启动，`Tun2socksStart` 只是返回一个可读的错误信封
+  （内含 `dlerror()` 文本），而不是加载期崩溃；
+- 它**不存在于本仓库**：由 `scripts/build-tun2socks.*` 编到
+  `entry/libs/arm64-v8a/libhevsocks5tun.so`，与 `libcore.so` 同目录、同一套查找逻辑。
+
+**线程模型**：`hev_socks5_tunnel_main_from_str()` 是**阻塞**的（直到
+`hev_socks5_tunnel_quit()` 被调用或出错），所以 `Tun2socksStart` 把它放到一个
+`std::thread` 上跑并立即返回；`Tun2socksStop` 从 JS 线程调 `quit()` 再 join，并把
+隧道线程的退出码/错误一起回传 —— 真机上这是唯一能区分"我们停的"与"它自己挂了"的地方。
+
+⚠️ **未验证**：这套代码与那个 `.so` 都没有在真机上跑过。hev 的后端能否处理 OHOS 的
+vNIC fd，就是公开问题 U3。
+
 ## 内存契约
 
 | 步骤 | 谁分配 | 谁释放 |
@@ -61,9 +92,16 @@ native 模块默认以 `-z now` 链接，未解析符号会变成硬链接错误
 
 | 符号 | 说明 |
 | --- | --- |
-| `Invoke(service, paramsJson) => string` | 唯一入口，**永远返回字符串**，永不抛异常 |
+| `Invoke(service, paramsJson) => string` | 控制面入口，**永远返回字符串**，永不抛异常 |
 | `CoreAvailable() => string` | 已加载的 `libcore.so` 绝对路径 / 空串 / `"unknown"` |
 | `GoFreeCString(ptr) => void` | 仅为 C ABI 对齐而导出；ArkTS 拿不到裸指针，实际不使用 |
+| `Tun2socksStart(configYaml, tunFd) => string` | 在 vNIC fd 上启动隧道，**立即返回**（主循环在独立线程） |
+| `Tun2socksStop() => string` | 停止隧道；幂等，并回传隧道线程的退出码 / 错误 |
+| `Tun2socksStats() => string` | 隧道收发计数（`hev_socks5_tunnel_stats`） |
+| `Tun2socksAvailable() => string` | `libhevsocks5tun.so` 的绝对路径 / 空串 / `"unknown"` |
+
+前三个属于控制面、后四个属于数据面。`Tun2socks*` 全部返回与 Go 内核**同形**的信封
+（`{success, result, error}`），所以 ArkTS 侧只有一条解析路径。
 
 `Invoke` 在任何失败路径上都返回 `{"success":false,"error":"…"}`，包括：
 入参不是字符串、service 为空、`libcore.so` 缺失、`dlsym` 失败、Go 侧 panic。
@@ -77,7 +115,7 @@ native 模块默认以 `-z now` 链接，未解析符号会变成硬链接错误
 ```
 entry/build-profile.json5
   └─ externalNativeOptions.path = ./src/main/cpp/CMakeLists.txt
-       └─ add_library(bridge SHARED napi_init.cpp)   →  libbridge.so
+       └─ add_library(bridge SHARED napi_init.cpp tun2socks_bridge.cpp)  →  libbridge.so
 ```
 
 `abiFilters` 固定为 `arm64-v8a`：Go 内核只有 aarch64 版本，列出 `x86_64`
@@ -91,3 +129,5 @@ entry/build-profile.json5
 | 返回 `dlsym(GoInvoke) failed` | `libcore.so` 存在但不是本项目的产物（或架构不对） |
 | 返回 `the service name must be a string` | ArkTS 传了非字符串（例如把 JSON 对象直接传进来了） |
 | 返回 `service not found: X.Y` | 服务名拼错，或 `app/app.go` 里漏了服务的空白导入 |
+| `Tun2socksStart` 返回 `libhevsocks5tun.so is not available: …` | 没跑 `scripts/build-tun2socks.*`，或产物不在 `entry/libs/arm64-v8a/`。错误里的 `dlerror()` 文本会指明是"文件不存在"还是"架构不对" |
+| `Tun2socksStop` 返回 `has no hev_socks5_tunnel_quit` | 那个 `.so` 不是 hev-socks5-tunnel 2.4.6+ 的产物（更早的版本没有 `quit`）。为防挂死，此时**不**去 join 线程 |

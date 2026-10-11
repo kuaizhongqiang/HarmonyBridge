@@ -34,6 +34,8 @@
 #include <vector>
 
 #include "napi/native_api.h"
+#include "native_util.h"
+#include "tun2socks_bridge.h"
 
 namespace {
 
@@ -60,21 +62,6 @@ GoInvokeFn g_goInvoke = nullptr;
 GoFreeCStringFn g_goFreeCString = nullptr;
 bool g_resolved = false;
 
-/** Directory containing this module, so we can look for libcore.so next to
- *  ourselves even if the loader's search path does not include it. */
-std::string ownDirectory() {
-    Dl_info info{};
-    if (dladdr(reinterpret_cast<void *>(&ownDirectory), &info) == 0 || info.dli_fname == nullptr) {
-        return {};
-    }
-    std::string path(info.dli_fname);
-    const auto slash = path.find_last_of('/');
-    if (slash == std::string::npos) {
-        return {};
-    }
-    return path.substr(0, slash + 1);
-}
-
 /** Try to open the core and resolve both symbols. Returns true on success. */
 bool ensureCoreResolved() {
     if (g_resolved) {
@@ -88,7 +75,7 @@ bool ensureCoreResolved() {
     }
     // Also try an absolute path beside libbridge.so, which is where hvigor
     // installs everything from entry/libs/<abi>/.
-    const std::string dir = ownDirectory();
+    const std::string dir = bridgeutil::ownDirectory();
     if (!dir.empty()) {
         for (const char *name : kCoreNames) {
             candidates.push_back(dir + name);
@@ -141,18 +128,17 @@ std::string coreUnavailableEnvelope() {
     } else {
         msg += " (dlopen succeeded but GoInvoke was not found)";
     }
-    // Hand-rolled rather than pulling a JSON library in: the only character
-    // that can appear in msg and needs escaping is the double quote and
-    // backslash, both of which come from loader error text.
-    std::string escaped;
-    escaped.reserve(msg.size() + 8);
-    for (char c : msg) {
-        if (c == '"' || c == '\\') {
-            escaped.push_back('\\');
-        }
-        escaped.push_back(c);
-    }
-    return std::string("{\"success\":false,\"error\":\"") + escaped + "\"}";
+    // Escaping lives in native_util.h so that this shim and the tun2socks
+    // data-plane loader emit byte-identical envelopes.
+    return std::string("{\"success\":false,\"error\":\"") +
+           bridgeutil::escapeJsonString(msg) + "\"}";
+}
+
+/** Build a failure envelope; kept beside the success path so the shape cannot
+ *  drift between the core calls and the data-plane calls. */
+std::string errorEnvelope(const std::string &message) {
+    return std::string("{\"success\":false,\"error\":\"") +
+           bridgeutil::escapeJsonString(message) + "\"}";
 }
 
 napi_value makeString(napi_env env, const std::string &value) {
@@ -290,6 +276,70 @@ napi_value CoreAvailable(napi_env env, napi_callback_info info) {
     return makeString(env, "");
 }
 
+// ---------------------------------------------------------------------------
+// tun2socks data plane (see tun2socks_bridge.h).
+//
+// These are a second, independent call surface of the same module. They do NOT
+// go through GoInvoke: the tunnel runs in this process on the vNIC fd that
+// VpnAbility.ets obtained from VpnConnection.create(), and it reaches the core
+// over 127.0.0.1:<socksPort> instead of over the C ABI.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tun2socksStart(configYaml: string, tunFd: number): string
+ *
+ * Starts the tunnel and returns immediately (the blocking hev main loop runs on
+ * its own thread). `tunFd` is the vNIC descriptor; the caller must keep its own
+ * copy open for as long as the tunnel runs.
+ */
+napi_value Tun2socksStart(napi_env env, napi_callback_info info) {
+    constexpr size_t kMaxArgs = 2;
+    napi_value argv[kMaxArgs] = {nullptr, nullptr};
+    size_t argc = kMaxArgs;
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+
+    if (argc < 2) {
+        return makeString(env, errorEnvelope("Tun2socksStart needs (configYaml, tunFd)"));
+    }
+
+    std::string config;
+    std::string why;
+    if (!readStringArg(env, argv[0], config, "the tun2socks config", why)) {
+        return makeString(env, errorEnvelope(why));
+    }
+
+    double fdNumber = -1;
+    if (napi_get_value_double(env, argv[1], &fdNumber) != napi_ok) {
+        return makeString(env, errorEnvelope("the tun fd must be a number"));
+    }
+
+    return makeString(env, tun2socks::Start(config, static_cast<int>(fdNumber)));
+}
+
+/** Tun2socksStop(): string - idempotent; stopping an idle tunnel succeeds. */
+napi_value Tun2socksStop(napi_env env, napi_callback_info info) {
+    (void)info;
+    return makeString(env, tun2socks::Stop());
+}
+
+/** Tun2socksStats(): string - packet/byte counters reported by hev. */
+napi_value Tun2socksStats(napi_env env, napi_callback_info info) {
+    (void)info;
+    return makeString(env, tun2socks::Stats());
+}
+
+/**
+ * Tun2socksAvailable(): string
+ *
+ * Mirror of CoreAvailable for the data plane: the loaded library path, an empty
+ * string when the load was attempted and failed, or "unknown" before the first
+ * attempt.
+ */
+napi_value Tun2socksAvailable(napi_env env, napi_callback_info info) {
+    (void)info;
+    return makeString(env, tun2socks::Available());
+}
+
 }  // namespace
 
 EXTERN_C_START
@@ -298,6 +348,10 @@ static napi_value Init(napi_env env, napi_value exports) {
         {"Invoke", nullptr, Invoke, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"GoFreeCString", nullptr, GoFreeCString, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"CoreAvailable", nullptr, CoreAvailable, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"Tun2socksStart", nullptr, Tun2socksStart, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"Tun2socksStop", nullptr, Tun2socksStop, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"Tun2socksStats", nullptr, Tun2socksStats, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"Tun2socksAvailable", nullptr, Tun2socksAvailable, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

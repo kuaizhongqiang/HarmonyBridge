@@ -26,6 +26,11 @@ include_directories(${NATIVERENDER_ROOT_PATH}
 
 add_library(bridge SHARED
     napi_init.cpp
+    # Loads and drives hev-socks5-tunnel (the tun2socks data plane) with
+    # dlopen/dlsym. Not linked to it: libhevsocks5tun.so is an external build
+    # artifact produced by scripts/build-tun2socks.* and lives next to
+    # libcore.so in entry/libs/arm64-v8a/.
+    tun2socks_bridge.cpp
 )
 
 target_link_libraries(bridge PUBLIC
