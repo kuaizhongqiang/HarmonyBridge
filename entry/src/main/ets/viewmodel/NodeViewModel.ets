@@ -10,7 +10,7 @@ import { dedupeNodes, nodeSummary, validateNode, ValidationResult } from '../ser
 import { generateId, parseShareLink } from '../service/ShareLinkParser';
 import { Bridge, LatencyResult } from '../core/Bridge';
 import { Logger } from '../utils/Logger';
-import { SUBSCRIPTION_ID_MANUAL, SUBSCRIPTION_NAME_MANUAL } from '../constants/Common';
+import { SUBSCRIPTION_ID_MANUAL, SUBSCRIPTION_NAME_MANUAL, CORE_SOCKS_PORT } from '../constants/Common';
 
 const TAG: string = 'NodeViewModel';
 /** 并发测延迟的数量（串行分批，避免一次性打爆网络） */
@@ -351,7 +351,10 @@ function buildMockNodes(): ServerNode[] {
     mockNode(4, '新加坡 01', ProxyProtocol.SHADOWSOCKS, 'sg01.example.com', 8388, 'mock-sub-1', '演示机场 A', 356, now),
     mockNode(5, '美国 洛杉矶 01', ProxyProtocol.HYSTERIA2, 'us01.example.com', 443, 'mock-sub-1', '演示机场 A', 512, now),
     mockNode(6, '台湾 彰化 01', ProxyProtocol.VMESS, 'tw01.example.com', 443, 'mock-sub-1', '演示机场 A', -1, now),
-    mockNode(7, '手动节点（本地 socks）', ProxyProtocol.SOCKS, '127.0.0.1', 10808, '', '', 1, now)
+    // 端口用 CORE_SOCKS_PORT（唯一 ArkTS 来源）：这个演示节点的语义就是
+    // "指向本机内核的本地 SOCKS 入站"，写死字面量会变成第四份端口副本。
+    mockNode(7, '手动节点（本地 socks）', ProxyProtocol.SOCKS, '127.0.0.1',
+      CORE_SOCKS_PORT, '', '', 1, now)
   ];
   return nodes;
 }

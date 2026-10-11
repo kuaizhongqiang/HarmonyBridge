@@ -4,8 +4,10 @@
  *
  * 设计约束：
  * 1) 只有本文件允许接触原生 NAPI 模块；其它层只调用 Bridge 的 typed API。
- * 2) 原生模块 libbridge.so 由另一个并行工作流实现，当前**尚不存在**，
- *    因此这里只保留一行被注释掉的 import，并提供 MockBridge 作为等价实现。
+ * 2) 原生模块 libbridge.so 由 `cpp/` 工作流实现，**已经是构建产物**（见下方 §0），
+ *    但 `MOCK_BRIDGE` 仍为 true，所以 UI 默认走 MockBridgeImpl —— 理由不是
+ *    "原生没实现"，而是本阶段无法验证真实链路（没有真机、libcore.so 尚未产出），
+ *    见 `MOCK_BRIDGE` 的注释。
  * 3) 原生契约（由 libbridge.so 提供）：
  *      export const Invoke: (service: string, paramsJson: string) => string;
  *    返回 JSON 信封：{ "success": boolean, "result": object, "error": string }
@@ -17,14 +19,37 @@ import { vpnExtension } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
   APP_BUNDLE_NAME,
+  CORE_HTTP_PORT,
+  CORE_SOCKS_PORT,
   MOCK_CORE_VERSION,
   VPN_ABILITY_NAME,
   WANT_KEY_ASSET_PATH,
-  WANT_KEY_CONFIG_PATH
+  WANT_KEY_CONFIG_PATH,
+  WANT_KEY_HTTP_PORT,
+  WANT_KEY_SOCKS_PORT
 } from '../constants/Common';
 import { Logger } from '../utils/Logger';
 import { ConfigStore, CorePaths } from './ConfigStore';
 import { GeoAssetService, GeoAssetStatus } from '../service/GeoAssetService';
+// 关于下面这一行（2026-10-11 起启用）：
+//   `import ... from 'libbridge.so'` 是**静态导入**。它此前被注释，理由是"cpp
+//   工作流尚未完成、产物是 gitignore 的外部文件"。这个理由现在**不再成立**：
+//   `entry/src/main/cpp/CMakeLists.txt` 已经是 hvigor 的构建输入
+//   （entry/build-profile.json5 的 externalNativeOptions.path），libbridge.so 是
+//   构建产物的一部分，不需要手工放置。
+//
+//   ArkTS 硬规则：**所有 `import` 必须位于其它语句之前**
+//   （arkts-no-misplaced-imports）。它最初被放在本文件第 57 行（`const TAG` 之后），
+//   真编译直接报错，已上移到此处。这也是本仓库"`.ets` 只有真编译才算数"的又一例证
+//   （AGENT.md §3.1）。
+//
+//   ⚠️ 导入它**不改变 UI 行为**：MOCK_BRIDGE 仍为 true，UI 走 MockBridgeImpl
+//   （它保持 true 的**真实理由**见下方 MOCK_BRIDGE 的注释，不再是"原生没实现"）。
+//   NativeBridgeImpl 也**仍然**返回 'native-bridge-not-linked'，本次没有动它。
+//
+//   目前使用这个导入的只有文件末尾的 DataPlane（tun2socks 数据面）：它是 VPN
+//   扩展进程的生命周期组件，与 UI 的 MOCK 开关无关，所以直接走原生。
+import bridgeNative from 'libbridge.so';
 
 const TAG: string = 'Bridge';
 
@@ -40,17 +65,35 @@ const TAG: string = 'Bridge';
 //       'unknown' = 尚未触发过惰性 dlopen
 //       其它      = libcore.so 的绝对路径
 //
-// 为什么这一行仍然是注释：
-//   `import ... from 'libbridge.so'` 是**静态导入**，产物 libbridge.so 属于
-//   gitignore 的构建产物；本阶段（UI 脚手架）要求零外部依赖风险，因此默认不引入。
-//   需要真机联调时按下面两步切换到真实桥接：
-//     1. 取消下一行注释；
-//     2. 把 MOCK_BRIDGE 置为 false（NativeBridgeImpl 即生效）。
-//   NativeBridgeImpl 已按上面的契约写好，无需再改代码。
-// import bridgeNative from 'libbridge.so';
+// 关于 `import bridgeNative from 'libbridge.so'`（2026-10-11 起启用）：
+//   该 import 因为 ArkTS「所有 import 必须位于其它语句之前」的硬规则
+//   （arkts-no-misplaced-imports），已搬去文件顶部的 import 区，
+//   完整解释也一并搬到了那里 —— 请见文件开头，不要在此处重复。
 // ===========================================================================
 
-/** MOCK 总开关：true = 内存实现（不触发任何原生调用）；false = 走 NativeBridgeImpl */
+/**
+ * MOCK 总开关：true = 内存实现（不触发任何原生调用）；false = 走 NativeBridgeImpl。
+ *
+ * ⚠️ **本阶段必须保持 true，但理由与以前不同。**
+ *
+ * 过时的旧理由（**已不成立**）："契约 §5 的原生侧待收敛清单还没做完，RuntimeInfo /
+ * SpeedTest / ConfigService.Generate 尚未实现"。这四项**本轮已由 Go 侧实现**，
+ * 详见 `BridgeService` 的 §实现状态。
+ *
+ * 现在保持 true 的真实理由：
+ *   1. **没有鸿蒙真机**（AGENT.md §1 / §7 B3）。VPN 授权弹窗、`vpn-tun` 网卡、
+ *      内核在本机进程里的加载，全部只能在真机上验证；模拟器大概率不支持 VPN，
+ *      不能当验证手段。此时把 UI 切到原生，只会把界面变成一条**无法验证**的路径。
+ *   2. **`libcore.so` 尚未产出**（AGENT.md §7 B2：Go→OHOS 工具链被 `socklen_t`
+ *      冲突与 cgo TLS 墙阻塞）。`libbridge.so` 能加载，但它 `dlopen("libcore.so")`
+ *      必然失败，任何服务调用都只会拿到错误信封。
+ *   3. **真实链路无法验证**，因此不得让 UI 表现为"已经连通真链路"。
+ *
+ * 若把它改成 false：UI 的**每一次**调用都会走 `NativeBridgeImpl`，而它当前**恒返回**
+ * `failure('native-bridge-not-linked')` —— 于是版本、连接、延迟、配置生成全部报错，
+ * 而这不是"更真实"，只是把"可控的 MOCK 提示"换成"全面失败"。
+ * 契约 §5 末尾与 AGENT.md §7 B3 都要求在此之前保持 true。
+ */
 export const MOCK_BRIDGE: boolean = true;
 
 /** 模拟调用耗时（毫秒），用于让 UI 的连接过程可见 */
@@ -66,9 +109,20 @@ const MOCK_LATENCY_MS: number = 350;
  * 曾经的教训：本文件早期使用无点驼峰名（'version'、'startCore' …），
  * 与原生侧完全对不上，导致 UI 的每一次调用都必然失败。
  *
- * §实现状态：`CoreService.Start` 目前原生侧仍是 tun-fd 模型，且
- * `CoreService.RuntimeInfo` / `ConfigService.Generate` / `PingService.SpeedTest`
- * 三个服务尚未实现 —— 因此 MOCK_BRIDGE 必须保持 true。详见契约文档 §4/§5。
+ * §实现状态（2026-10-11 更新，✅ 与契约 §5 的《原生侧待收敛清单》对齐）：
+ * 契约 §5 要求的四项**已由 Go 侧实现**（本文件不再把它们当作"MOCK 的理由"）：
+ *   * `CoreService.Start`：参数新增可选 `socksPort` / `httpPort`，结果新增
+ *     `socksPort` / `httpPort`；`wired` 的语义改为"**本地 SOCKS/HTTP 入站已监听**"
+ *     （不再是"tun 入站已挂载"）；不再返回 `fd`。
+ *   * 新增 `CoreService.RuntimeInfo`（`{socksPort, httpPort, configLocation?}`）。
+ *   * 新增 `PingService.SpeedTest`（`{speedBps, notes[]}`；本阶段 `speedBps` 恒为 0，
+ *     **不伪造测量值**）。
+ *   * `PingService.Tcping` 结果字段 `delayMs` → `latencyMs`（ArkTS 侧本来就按
+ *     `latencyMs` 读，见 `Bridge.testLatency`，所以这次改名修的是一个潜在的静默 bug）。
+ *
+ * ⚠️ 但 `MOCK_BRIDGE` **仍然是 true** —— 真实理由（没有真机、`libcore.so` 尚未产出、
+ * 真实链路无法验证）见 `MOCK_BRIDGE` 的注释。契约文档 §4 的"实现"列**已同步为 ✅**
+ * （2026-10-11 收尾），所以现在没有任何地方再声称这四项"待实现"。
  */
 export class BridgeService {
   static readonly VERSION: string = 'VersionService.GetVersion';
@@ -198,18 +252,62 @@ function delay(ms: number): Promise<void> {
   return promise;
 }
 
-/** 启动内核的结果 */
+/**
+ * `CoreService.Start` 的原生**线上形状**（契约 §4）。
+ *
+ * 为什么要单独声明一个 raw 形状：ArkTS 禁止"对象字面量直接当接口用"
+ * （arkts-no-untyped-obj-literals），Mock 实现必须挂到一个显式类型上才能造出
+ * **与原生同形**的结果。Mock 若返回另一种形状，就失去了"用 Mock 验证调用方解析
+ * 逻辑"的价值 —— 而这次的缺陷恰恰是"解析逻辑判错了成功"。
+ */
+interface StartCoreRawResult {
+  started: boolean;
+  wired: boolean;
+  socksPort: number;
+  httpPort: number;
+  notes: string[];
+}
+
+/** 启动内核的结果（ArkTS 侧对外形状） */
 export interface StartCoreResult {
   /**
-   * 进程号。**当前恒为 0**：冻结契约下核心以动态库形式跑在 VPN 扩展进程内，
-   * 不是独立进程，因此原生侧没有 pid 可回报。保留字段是为了将来若改走
-   * childProcessManager 独立进程时不再改动上层调用点。
+   * **启动是否成功的唯一判据** = `envelope.success === true && result.started === true`。
+   *
+   * 为什么用布尔字段而不是"失败时抛错"：Bridge 层的既有约定是"**永不抛异常**，
+   * 失败编码进返回值"（契约 §3.3、`DataPlane` 的注释），`Bridge.invoke` 的 catch
+   * 留给 NAPI/JSON 这类**真异常**。若把业务失败也做成异常，调用方就无法区分
+   * "内核没启动"与"桥断了"，而**这正是本接口此前那个缺陷的根源**：
+   * 旧代码用 `pid <= 0` 判成功，而 `pid` 被契约定义为恒 0，于是**每次成功的启动
+   * 都被 UI 判成失败**。判据必须是语义明确的布尔值，而不是一个"恰好为 0"的数字。
+   */
+  ok: boolean;
+  /**
+   * 失败原因（成功时为空串）。区分"信封失败"（如原生 error 文本）与
+   * "原生说没启动"，供调用方填进 `lastError` 时定位原因。
+   */
+  error: string;
+  /**
+   * 进程号。**当前恒为 0，且不再从原生结果里读**：冻结契约下核心以动态库形式跑在
+   * VPN 扩展进程内，不是独立进程，契约的 Start 结果里**根本没有 `pid` 字段**
+   * （§4：`{started, configLoaded, configBytes, wired, socksPort, httpPort, version, notes[]}`）。
+   * 保留字段只为将来若改走 childProcessManager 独立进程时不再改动上层调用点。
+   * ⚠️ 它**不是**成功判据 —— 判据是 `ok`。
    */
   pid: number;
-  /** 本地 socks 入站端口 */
+  /** 本地 socks 入站端口（0 已被回落为 `CORE_SOCKS_PORT`） */
   socksPort: number;
-  /** 本地 http 入站端口 */
+  /** 本地 http 入站端口（0 已被回落为 `CORE_HTTP_PORT`） */
   httpPort: number;
+  /**
+   * 出站是否可路由 = 本地 SOCKS/HTTP 入站**是否真的在监听**（契约 §4.1 的新语义，
+   * 不再表示"tun 入站已挂载"）。
+   *
+   * **本阶段恒为 false**：契约 §5.1 已把语义改过来，但"真的有监听"要等真机验证。
+   * UI 不得据此宣称"已连通"（见 `ConnectionViewModel.coreWired`）。
+   */
+  wired: boolean;
+  /** 原生侧的诚实提示（"实例起来了但入站没接线"之类），UI/日志应展示 */
+  notes: string[];
 }
 
 /** 内核状态结果 */
@@ -236,6 +334,17 @@ export interface ConfigPathResult {
   notes: string[];
   /** geoip.dat / geosite.dat 是否就位（决定 rule 模式能否按国家分流） */
   geoAssets: boolean;
+  /**
+   * 内核本地 SOCKS 入站端口，取自 `ConfigService.Generate` 的**结果**
+   * （契约 §4 的结果字段），原生没给时回落为 `CORE_SOCKS_PORT`。
+   *
+   * ⚠️ 它不能由 ArkTS 自己"决定"：生成出来的 config.json 里的 inbound 端口是
+   * Go 侧 `config.DefaultSocksPort` 写死的，ArkTS 只是把同一次生成的结果回显值
+   * 传给 `CoreService.Start` 与 VPN 扩展（tun2socks 要连的端口）。三方必须同一个数。
+   */
+  socksPort: number;
+  /** 内核本地 HTTP 入站端口（同上） */
+  httpPort: number;
 }
 
 /** 内核实现接口：MockBridge 与 NativeBridge 都实现它 */
@@ -261,7 +370,19 @@ class MockBridgeImpl implements IBridge {
     if (service === BridgeService.START_CORE) {
       this.coreRunning = true;
       this.corePid = 4242;
-      const result: StartCoreResult = { pid: this.corePid, socksPort: 10808, httpPort: 10809 };
+      // 造一份**与原生同形**的结果（StartCoreRawResult），而不是直接造 ArkTS 侧
+      // 的 StartCoreResult：这样 Bridge.startCore 的解析逻辑（含 ok 的判定与端口
+      // 回落）在 MOCK 下也会被真实执行，不至于"Mock 永远成功、真机才暴露"。
+      //
+      // wired 故意是 false —— 本阶段原生侧也恒为 false（没有真实监听），
+      // Mock 若报 true 就是在教 UI 相信一件不成立的事。
+      const result: StartCoreRawResult = {
+        started: true,
+        wired: false,
+        socksPort: CORE_SOCKS_PORT,
+        httpPort: CORE_HTTP_PORT,
+        notes: ['mock: core not really started; wired is always false in this phase']
+      };
       return success(result);
     }
     if (service === BridgeService.STOP_CORE) {
@@ -309,12 +430,19 @@ class MockBridgeImpl implements IBridge {
         configPath: '/data/storage/el2/base/haps/entry/files/core/config.json',
         assetPath: assetDir,
         notes: [],
-        geoAssets: geoStatus.present
+        geoAssets: geoStatus.present,
+        // 端口取自同一份 CORE_SOCKS_PORT 回落值：真实模式下这里回显的是
+        // ConfigService.Generate 的结果字段（Go 侧 DefaultSocksPort/DefaultHTTPPort）。
+        socksPort: CORE_SOCKS_PORT,
+        httpPort: CORE_HTTP_PORT
       };
       return success(result);
     }
     if (service === BridgeService.RUNTIME_INFO) {
-      const result: Record<string, number> = { 'socksPort': 10808, 'httpPort': 10809 };
+      const result: Record<string, number> = {
+        'socksPort': CORE_SOCKS_PORT,
+        'httpPort': CORE_HTTP_PORT
+      };
       return success(result);
     }
     if (service === BridgeService.VALIDATE_NODE) {
@@ -326,7 +454,7 @@ class MockBridgeImpl implements IBridge {
 }
 
 // ---------------------------------------------------------------------------
-// 原生实现（把顶部 import 取消注释、并把 MOCK_BRIDGE 置为 false 后生效）
+// 原生实现（`MOCK_BRIDGE` 置为 false 后生效；static import 已在文件顶部启用）
 // ---------------------------------------------------------------------------
 class NativeBridgeImpl implements IBridge {
   async invoke(service: string, params: Record<string, Object>): Promise<NativeEnvelope> {
@@ -335,6 +463,11 @@ class NativeBridgeImpl implements IBridge {
     //   const raw: string = bridgeNative.Invoke(service, paramsJson);
     //   return decodeEnvelope(raw);
     // decodeEnvelope 已经处理「失败信封没有 result 字段」的情况，不要直接 JSON.parse。
+    //
+    // ⚠️ 如实说明（2026-10-11）：这一行**仍然**是 `native-bridge-not-linked`，
+    // 本轮没有把它接上真实链路 —— 因为 `libcore.so` 尚未产出、也没有真机可验证。
+    // 因此 `MOCK_BRIDGE` 一旦改成 false，UI 的每一次调用都会拿到失败信封
+    // （见 MOCK_BRIDGE 的注释）。这是有意为之的"未接状态"，不是遗漏。
     return failure('native-bridge-not-linked');
   }
 }
@@ -429,7 +562,9 @@ export class Bridge {
       configPath: '',
       assetPath: paths.assetDir,
       notes: [],
-      geoAssets: false
+      geoAssets: false,
+      socksPort: CORE_SOCKS_PORT,
+      httpPort: CORE_HTTP_PORT
     };
     if (!envelope.success) {
       Logger.error(TAG, 'generateConfig failed: ' + envelope.error);
@@ -438,6 +573,24 @@ export class Bridge {
 
     result.notes = stringArrayField(envelope.result, 'notes');
     result.geoAssets = boolField(envelope.result, 'geoAssets');
+
+    // 端口以原生结果为准；原生漏给（0/缺失）时**回落到唯一常量**，绝不把 0 传下去
+    // —— 0 会让 Start 与 tun2socks 都拿到一个非法端口。
+    //
+    // ⚠️ 为什么端口是"读结果"而不是"当参数传进去"：契约 §4 的 ConfigService.Generate
+    // **参数表里没有** socksPort/httpPort（只有 nodeId/routingMode/extra/assetDir/bypassChina），
+    // Go 的 GenerateRequest 也没有这两个字段、端口由 config.DefaultSocksPort 决定并回显。
+    // 若在这里多传两个字段，Go 会**静默忽略**（encoding/json 忽略未知字段），
+    // 于是 ArkTS 会以为自己能覆盖端口 —— 那是比重复字面量更危险的假象。
+    // 权威值只有一份（Go），ArkTS 负责把它转交给 Start 与 VPN 扩展。
+    result.socksPort = numberField(envelope.result, 'socksPort');
+    result.httpPort = numberField(envelope.result, 'httpPort');
+    if (result.socksPort <= 0) {
+      result.socksPort = CORE_SOCKS_PORT;
+    }
+    if (result.httpPort <= 0) {
+      result.httpPort = CORE_HTTP_PORT;
+    }
 
     const configJson: string = stringField(envelope.result, 'configJson');
     if (configJson.length > 0) {
@@ -450,28 +603,68 @@ export class Bridge {
     return result;
   }
 
-  /** 启动内核 */
-  static async startCore(configPath: string, assetPath: string): Promise<StartCoreResult> {
+  /**
+   * 启动内核。
+   *
+   * @param socksPort / httpPort **必须来自 `ConfigPathResult`**（即
+   *        `ConfigService.Generate` 的结果），不要各自写死：同一批端口要同时给
+   *        内核的本地入站（契约 §5.1 的 Start 参数）与 VPN 扩展里的 tun2socks。
+   *        传 0 或负数时回落到 `CORE_SOCKS_PORT` / `CORE_HTTP_PORT`。
+   * @returns `StartCoreResult`；**判成功看 `ok`，不要看 `pid`**（pid 恒为 0）。
+   */
+  static async startCore(
+    configPath: string,
+    assetPath: string,
+    socksPort: number,
+    httpPort: number
+  ): Promise<StartCoreResult> {
+    const wantedSocks: number = socksPort > 0 ? socksPort : CORE_SOCKS_PORT;
+    const wantedHttp: number = httpPort > 0 ? httpPort : CORE_HTTP_PORT;
     // 契约参数名为 configLocation / assetLocation；start:true 表示真正启动
     // （缺省 false 的行为是"只读配置 + 校验，不启动"，见契约文档 §4.1）。
+    // socksPort/httpPort 是契约 §5.1 新增的可选参数，用于让原生知道"我们期望的入站端口"。
     const params: Record<string, Object> = {
       'configLocation': configPath,
       'assetLocation': assetPath,
+      'socksPort': wantedSocks,
+      'httpPort': wantedHttp,
       'start': true
     };
     const envelope: NativeEnvelope = await Bridge.invoke(BridgeService.START_CORE, params);
-    const result: StartCoreResult = { pid: 0, socksPort: 0, httpPort: 0 };
+    const result: StartCoreResult = {
+      ok: false,
+      error: '',
+      pid: 0,
+      socksPort: wantedSocks,
+      httpPort: wantedHttp,
+      wired: false,
+      notes: []
+    };
     if (!envelope.success) {
-      Logger.error(TAG, 'startCore failed: ' + envelope.error);
+      // 契约 §5 的参数没变、但服务本身失败（如配置读不到、Xray 起不来）。
+      // 把原生 error 原文带出去：调用方要能区分"原生拒绝了"与"原生说没启动"。
+      result.error = envelope.error.length > 0 ? envelope.error : 'start-core-envelope-failed';
+      Logger.error(TAG, 'startCore failed: ' + result.error);
       return result;
     }
-    // 原生当前不返回 pid（见 StartCoreResult 注释）
-    const pid: Object | undefined = envelope.result['pid'];
-    const socksPort: Object | undefined = envelope.result['socksPort'];
-    const httpPort: Object | undefined = envelope.result['httpPort'];
-    result.pid = typeof pid === 'number' ? pid as number : 0;
-    result.socksPort = typeof socksPort === 'number' ? socksPort as number : 0;
-    result.httpPort = typeof httpPort === 'number' ? httpPort as number : 0;
+    // ⚠️ pid 不读原生了：契约的 Start 结果里没有 pid 字段（见 StartCoreResult 注释）。
+    const started: boolean = boolField(envelope.result, 'started');
+    result.wired = boolField(envelope.result, 'wired');
+    result.notes = stringArrayField(envelope.result, 'notes');
+    // 成功判据（唯一）：信封成功 **且** 原生明确回报 started=true。
+    // 绝不能再用 pid <= 0 —— 那正是此前"原生启动成功、UI 却必然判失败"的缺陷。
+    result.ok = started;
+    if (!result.ok) {
+      result.error = 'start-core-not-started';
+    }
+    const reportedSocks: number = numberField(envelope.result, 'socksPort');
+    const reportedHttp: number = numberField(envelope.result, 'httpPort');
+    if (reportedSocks > 0) {
+      result.socksPort = reportedSocks;
+    }
+    if (reportedHttp > 0) {
+      result.httpPort = reportedHttp;
+    }
     return result;
   }
 
@@ -511,16 +704,24 @@ export class Bridge {
    * @param context 调用方 UIAbilityContext（页面里通过 getContext(this) 取得）
    * @param configPath 内核配置文件路径（写入 want.parameters）
    * @param assetPath 资源目录路径（写入 want.parameters）
+   * @param socksPort / httpPort 内核本地入站端口（写入 want.parameters）。
+   *        扩展进程是**另一个进程**，拿不到 UI 进程的 `ConfigPathResult`，
+   *        而它要用 SOCKS 端口去生成 tun2socks 的 YAML —— 不传的话扩展就只能自己
+   *        猜一个数字，两侧一漂移就是"tun2socks 连到没人在听的端口"，静默不通。
    * @returns 连接 id；失败返回 -1
    */
   static async connectVpn(
     context: common.UIAbilityContext,
     configPath: string,
-    assetPath: string
+    assetPath: string,
+    socksPort: number,
+    httpPort: number
   ): Promise<number> {
     const params: Record<string, Object> = {};
     params[WANT_KEY_CONFIG_PATH] = configPath;
     params[WANT_KEY_ASSET_PATH] = assetPath;
+    params[WANT_KEY_SOCKS_PORT] = socksPort > 0 ? socksPort : CORE_SOCKS_PORT;
+    params[WANT_KEY_HTTP_PORT] = httpPort > 0 ? httpPort : CORE_HTTP_PORT;
 
     const want: Want = {
       bundleName: APP_BUNDLE_NAME,
@@ -579,4 +780,157 @@ export class Bridge {
     }
     return ok;
   }
+}
+
+// ===========================================================================
+// 数据面：TUN fd -> tun2socks -> 本地 SOCKS
+// ---------------------------------------------------------------------------
+// 位置（冻结契约：docs/design/ipc-contract.md §2）：
+//
+//   VpnConnection.create() 返回的 vNIC fd
+//     -> tun2socks（libhevsocks5tun.so，heiher/hev-socks5-tunnel，MIT）
+//     -> 127.0.0.1:<socksPort>
+//     -> libcore.so（Xray-core 的本地 SOCKS 入站，分流规则在这一层生效）
+//
+// 为什么不把 fd 直接交给内核：见契约 §2 —— HarmonyOS 的 VPN fd 拒绝 Fstat，
+// 且现役 libXray 不再导出 CGoSetTunFd。先例（x4h/Hey/Karing/etohos）可验证的
+// 数据面也都是 tun2socks。
+//
+// 为什么选 hev 而不是 Go(gVisor) 版 tun2socks：
+//   * 纯 C -> 不需要 Go 工具链 fork，绕开 B2（Go 没有 GOOS=ohos 目标）；
+//   * MIT -> 仓库保持 MIT + Xray-core(MPL-2.0) 的边界，GPL 版会失守（§9 第 3 条）。
+//
+// 未验证：本门面与那个 .so 都没有在真机上跑过。hev 的后端能否处理 OHOS 的
+// vNIC fd，就是公开问题 U3。
+// ===========================================================================
+
+/** tun2socks 的启动结果 */
+export interface DataPlaneStartResult {
+  /** 隧道是否已开始运行 */
+  started: boolean;
+  /** 实际加载到的 libhevsocks5tun.so 路径；未加载时为空串 */
+  libPath: string;
+  /** 失败原因；成功时为空串 */
+  error: string;
+}
+
+/** tun2socks 的收发计数（来自 hev_socks5_tunnel_stats） */
+export interface DataPlaneStats {
+  running: boolean;
+  txPackets: number;
+  txBytes: number;
+  rxPackets: number;
+  rxBytes: number;
+}
+
+/**
+ * tun2socks 数据面门面。
+ *
+ * 与 `Bridge` 一样，这里是接触原生 NAPI 的出口（另一处是 `Bridge.invoke`）。
+ * 不同点：数据面不走 `Invoke` 的 JSON 服务路由，而是直接调 libbridge.so 上另外
+ * 四个符号（Tun2socksStart/Stop/Stats/Available）—— 隧道跑在本进程、通过
+ * 127.0.0.1:<socksPort> 与内核对话，不经过 C ABI。
+ *
+ * 所有调用都返回字符串信封，**永不抛异常**；缺少 .so 时拿到的是
+ * `{"success":false,"error":"libhevsocks5tun.so is not available: <dlerror>"}`
+ * 这种可读错误，而不是崩溃 —— 这正是真机排查需要的信号。
+ */
+export class DataPlane {
+  /** libhevsocks5tun.so 是否可加载：路径 / ''（加载失败）/ 'unknown'（尚未尝试） */
+  static available(): string {
+    try {
+      return bridgeNative.Tun2socksAvailable();
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      Logger.error(TAG, 'Tun2socksAvailable failed: ' + err.code.toString() + ' ' + err.message);
+      return '';
+    }
+  }
+
+  /**
+   * 在 vNIC fd 上启动隧道。
+   *
+   * `configYaml` 是 hev 的 YAML 配置（tunnel / socks5 / misc 段），由调用方生成 ——
+   * 因为 tun 地址、MTU、socks 端口都是 ArkTS 侧已经定义好的量。
+   * `tunFd` 是 VpnConnection.create() 返回的 fd；调用方必须自己保留这份 fd，
+   * 直到隧道停止。
+   *
+   * 立即返回：阻塞的 hev 主循环跑在原生侧的独立线程上。
+   */
+  static async start(configYaml: string, tunFd: number): Promise<DataPlaneStartResult> {
+    const result: DataPlaneStartResult = { started: false, libPath: '', error: '' };
+    let raw: string = '';
+    try {
+      raw = bridgeNative.Tun2socksStart(configYaml, tunFd);
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      result.error = 'Tun2socksStart threw: ' + err.code.toString() + ' ' + err.message;
+      Logger.error(TAG, result.error);
+      return result;
+    }
+    const envelope: NativeEnvelope = decodeEnvelope(raw);
+    if (!envelope.success) {
+      result.error = envelope.error;
+      return result;
+    }
+    result.started = boolField(envelope.result, 'started');
+    result.libPath = stringField(envelope.result, 'libPath');
+    if (!result.started) {
+      result.error = 'tun2socks reported started=false';
+    }
+    return result;
+  }
+
+  /** 停止隧道。幂等：停止一个空闲的隧道也算成功。 */
+  static async stop(): Promise<boolean> {
+    let raw: string = '';
+    try {
+      raw = bridgeNative.Tun2socksStop();
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      Logger.error(TAG, 'Tun2socksStop threw: ' + err.code.toString() + ' ' + err.message);
+      return false;
+    }
+    const envelope: NativeEnvelope = decodeEnvelope(raw);
+    if (!envelope.success) {
+      Logger.warn(TAG, 'Tun2socksStop: ' + envelope.error);
+      return false;
+    }
+    // 隧道线程的退出信息在这里回传：真机据此区分"我们停的"与"它自己挂了"。
+    const lastError: string = stringField(envelope.result, 'lastError');
+    if (lastError.length > 0) {
+      Logger.warn(TAG, 'tun2socks exited with: ' + lastError);
+    }
+    return true;
+  }
+
+  /** 读取隧道计数；失败时返回全零且 running=false。 */
+  static async stats(): Promise<DataPlaneStats> {
+    const stats: DataPlaneStats = { running: false, txPackets: 0, txBytes: 0, rxPackets: 0, rxBytes: 0 };
+    let raw: string = '';
+    try {
+      raw = bridgeNative.Tun2socksStats();
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      Logger.warn(TAG, 'Tun2socksStats failed: ' + err.code.toString() + ' ' + err.message);
+      return stats;
+    }
+    const envelope: NativeEnvelope = decodeEnvelope(raw);
+    if (!envelope.success) {
+      Logger.warn(TAG, 'Tun2socksStats: ' + envelope.error);
+      return stats;
+    }
+    stats.running = boolField(envelope.result, 'running');
+    stats.txPackets = numberField(envelope.result, 'txPackets');
+    stats.txBytes = numberField(envelope.result, 'txBytes');
+    stats.rxPackets = numberField(envelope.result, 'rxPackets');
+    stats.rxBytes = numberField(envelope.result, 'rxBytes');
+    return stats;
+  }
+}
+
+/** 从信封结果里取数字字段（类型不符时返回 0） */
+function numberField(result: Record<string, Object>, key: string): number {
+  const value: Object | undefined = result[key];
+  return typeof value === 'number' ? value as number : 0;
 }

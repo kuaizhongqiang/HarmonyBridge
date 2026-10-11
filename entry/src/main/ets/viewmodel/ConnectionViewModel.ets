@@ -37,6 +37,17 @@ export class ConnectionViewModel {
   @Trace routingMode: RoutingMode = RoutingMode.RULE;
   /** 内核版本（启动后由 Bridge 填充） */
   @Trace coreVersion: string = '';
+  /**
+   * 内核的本地入站**是否真的在监听**（契约 §4.1 的 `wired`，不是"tun 已挂载"）。
+   *
+   * **本阶段恒为 false**：没有真机、真实监听未验证。把它做成可观察状态，是为了不让
+   * UI 把"内核已启动"和"数据面已连通"混为一谈 —— 前者由 `state === CONNECTED`
+   * 表达，后者只能由这个字段表达。
+   * ⚠️ 给 wired=false 加一条独立的界面提示需要新增 string 资源（`$r('app.string.*')`，
+   * 见 AGENT.md §3 第 8 条），本轮没有新增资源，因此界面上的诚实表达仍由既有的
+   * MOCK 横幅承担（`mockMode === true`）；日志侧则逐条打印原生 notes。
+   */
+  @Trace coreWired: boolean = false;
   /** 最近一次错误信息 */
   @Trace lastError: string = '';
   /** 是否 MOCK 模式（首页横幅） */
@@ -138,23 +149,54 @@ export class ConnectionViewModel {
       }
       this.configPath = generated.configPath;
       this.assetPath = generated.assetPath;
+      // 入站端口**只有一个来源**：ConfigService.Generate 的结果（原生回显的正是它
+      // 写进 config.json 的那个端口）。同一份值同时给 Start 与 VPN 扩展进程
+      // （扩展里的 tun2socks 要连它）。此前三处各自写死 10808，一旦漂移的症状是
+      // "tun2socks 连到一个没人在听的端口" —— 静默不通，没有任何报错。
+      const socksPort: number = generated.socksPort;
+      const httpPort: number = generated.httpPort;
 
       if (context !== undefined) {
-        this.connectionId = await Bridge.connectVpn(context, this.configPath, this.assetPath);
+        this.connectionId = await Bridge.connectVpn(
+          context, this.configPath, this.assetPath, socksPort, httpPort
+        );
       } else {
         Logger.warn(TAG, 'connect without UIAbilityContext: VPN extension not started');
       }
 
-      const started: StartCoreResult = await Bridge.startCore(this.configPath, this.assetPath);
-      if (started.pid <= 0) {
-        this.lastError = 'start-core-failed';
+      const started: StartCoreResult = await Bridge.startCore(
+        this.configPath, this.assetPath, socksPort, httpPort
+      );
+      // 成功判据是 `started.ok`（= 信封成功 **且** 原生回报 started===true）。
+      //
+      // 🔴 曾经的真 bug：这里写的是 `started.pid <= 0`，而 `pid` 按契约**恒为 0**
+      // （内核跑在 VPN 扩展进程内，不是独立进程），于是**原生明明启动成功，UI 也
+      // 必然判失败**。pid 不是判据，ok 才是。
+      if (!started.ok) {
+        this.lastError = started.error.length > 0
+          ? 'start-core-failed: ' + started.error
+          : 'start-core-failed';
         this.transition(ConnectionState.ERROR);
+        Logger.error(TAG, 'connect aborted: ' + this.lastError);
         return;
+      }
+      // wired=false 是本阶段的常态，不是可以省略的细节：内核起来了但本地入站还没
+      // 真实监听，流量此时过不去。如实体现在状态与日志里，不让 UI 假装"已连通"。
+      this.coreWired = started.wired;
+      for (let i = 0; i < started.notes.length; i++) {
+        Logger.warn(TAG, 'start note: ' + started.notes[i]);
+      }
+      if (!this.coreWired) {
+        Logger.warn(TAG, 'core started but wired=false: no local inbound is listening, '
+          + 'traffic cannot flow yet (this is the expected state in the current phase)');
       }
       await this.refreshCoreVersion();
       this.transition(ConnectionState.CONNECTED);
       this.startMockTrafficIfNeeded();
-      Logger.info(TAG, 'connected to ' + node.remarks + ' (pid=' + started.pid.toString() + ')');
+      Logger.info(TAG, 'core started for ' + node.remarks
+        + ' (socks=' + started.socksPort.toString()
+        + ', http=' + started.httpPort.toString()
+        + ', wired=' + started.wired.toString() + ')');
     } catch (error) {
       this.lastError = Logger.describe(error as Object);
       this.transition(ConnectionState.ERROR);
@@ -175,6 +217,7 @@ export class ConnectionViewModel {
         await Bridge.disconnectVpn(context, this.connectionId);
       }
       this.connectionId = -1;
+      this.coreWired = false;
       this.traffic = emptyTrafficStats();
       this.transition(ConnectionState.DISCONNECTED);
       Logger.info(TAG, 'disconnected');
