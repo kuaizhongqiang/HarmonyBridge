@@ -127,6 +127,12 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
    （`ets/core/ConfigStore.ets`）后交给 `CoreService.Start` 的 `configLocation` ——
    沙箱布局只有 ArkTS 知道，原生侧不掺和。相关 UI 侧说明见 [`ui.md`](ui.md) §5.5。
 
+   **`extra` 的字段清单是活的**（改字段必须两侧同改，守卫测试会拦）。此后新增过一轮
+   安全层字段：`pinnedPeerCertSha256` / `verifyPeerCertByName` / `disableSystemRoot` /
+   `echConfigList` / `tlsCertificates`，用来替代已被内核删除的 `allowInsecure`
+   （`allowInsecure` 本身**保留**在字段清单里，但只做导入兼容、生成时绝不写入）。
+   见 [`ui.md`](ui.md) §5.6 与 [`core.md`](core.md) §7.4.5.1。
+
 > 在这些改动完成之前，UI 必须保持 `MOCK_BRIDGE = true`。
 > 这不是"临时妥协"，而是**正确的当前状态**：契约已冻结，实现尚未跟上，且这一点被明确记录。
 

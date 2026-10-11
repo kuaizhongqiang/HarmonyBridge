@@ -23,20 +23,44 @@ export const PROTOCOL_OPTIONS: string[] = [
 ];
 
 /**
- * 底层传输方式。
+ * 底层传输方式（表单可选项）。
+ *
+ * 取值与 v2rayN 的 `Global.Networks`（`Global.cs:331-339`）**逐项一致**：
+ * `raw / xhttp / kcp / grpc / ws / httpupgrade`。
  * 注：v2rayN 的 `Networks` 首项是 `raw`，本项目枚举里叫 `tcp`（`transportFromText` 两者都接受），
  * 这里用本项目枚举值，保证「读入 -> 表单 -> 写回」不丢信息。
+ *
+ * ❌ **刻意不含 `h2` / `quic`**：本版内核已删除它们
+ * （`infra/conf/transport_internet.go:1015-1018` 走 `PrintRemovedFeatureError`），
+ * 放进来只会让用户选到一个必然失败的选项。`TransportKind.H2/QUIC` 枚举值仍保留，
+ * 用于忠实解析导入链接并给出精确报错。
  */
 export const TRANSPORT_OPTIONS: string[] = [
   TransportKind.TCP.toString(),
   TransportKind.WS.toString(),
   TransportKind.GRPC.toString(),
-  TransportKind.H2.toString(),
   TransportKind.HTTP_UPGRADE.toString(),
   TransportKind.XHTTP.toString(),
-  TransportKind.KCP.toString(),
-  TransportKind.QUIC.toString()
+  TransportKind.KCP.toString()
 ];
+
+/**
+ * 表单用的传输方式选项：当节点当前值不在可选列表里时（例如导入了一份 `type=h2`
+ * 的分享链接），把当前值**顶到列表首位**而不是静默显示成 TCP。
+ *
+ * 这样用户能看见真实值，也才能主动改成一个可用的传输方式；若直接落回 TCP，
+ * 界面会撒谎（显示 tcp，实际字段是 h2）。
+ */
+export function transportOptionsFor(current: string): string[] {
+  if (current.length === 0 || TRANSPORT_OPTIONS.indexOf(current) >= 0) {
+    return TRANSPORT_OPTIONS;
+  }
+  const list: string[] = [current];
+  for (let i = 0; i < TRANSPORT_OPTIONS.length; i++) {
+    list.push(TRANSPORT_OPTIONS[i]);
+  }
+  return list;
+}
 
 /** 传输层安全 */
 export const SECURITY_OPTIONS: string[] = [

@@ -5,7 +5,10 @@
  *   协议参数（用户 ID + 生成 / 密码 / 加密方式 / alterId / flow / Mux）
  *   底层传输方式（传输协议 / Host / 路径 / serviceName / raw 伪装类型 / kcp 伪装类型 /
  *                 gRPC 模式 / XHTTP 模式 / XHTTP extra / Finalmask）
- *   传输层安全（TLS / SNI / Fingerprint / Alpn / 跳过证书校验 / PublicKey / ShortId / SpiderX）
+ *   传输层安全（TLS / SNI / Fingerprint / Alpn / 跳过证书校验（已废弃，仅告警）
+ *                / pinnedPeerCertSha256 / verifyPeerCertByName / ECH / disableSystemRoot
+ *                / certificates（JSON）
+ *                / PublicKey / ShortId / SpiderX）
  *
  * 状态不放在本组件内部：表单对象由页面持有并作为 `@Param` 传入（见 viewmodel/NodeEditForm.ets），
  * 因此与 Sheet 内容的创建/销毁时机无关，字段一定能显示成最新值。
@@ -26,7 +29,7 @@ import {
   RAW_HEADER_OPTIONS,
   SECURITY_OPTIONS,
   SS_CIPHER_OPTIONS,
-  TRANSPORT_OPTIONS,
+  transportOptionsFor,
   VMESS_SECURITY_OPTIONS,
   XHTTP_MODE_OPTIONS
 } from '../constants/NodeOptions';
@@ -346,9 +349,11 @@ export struct NodeEditSheet {
           // ===== 底层传输方式 =====
           NodeFormSection({ title: $r('app.string.node_section_transport') })
 
+          // 选项表刻意不含 h2 / quic（内核已删除）。若导入的节点用的是它们，
+          // transportOptionsFor 会把当前值顶到首位如实显示，而不是假装成 tcp。
           NodeSelectField({
             label: $r('app.string.node_label_network'),
-            options: TRANSPORT_OPTIONS,
+            options: transportOptionsFor(this.form.transport),
             value: this.form.transport,
             onValue: (value: string) => {
               this.form.transport = value;
@@ -423,8 +428,9 @@ export struct NodeEditSheet {
             })
           }
 
-          if (this.form.transport === TransportKind.TCP.toString() ||
-            this.form.transport === TransportKind.H2.toString()) {
+          // raw 伪装类型只在 raw/tcp 下有落点（build.go 的 `case "tcp"`），
+          // 因此不跟着 H2 显示 —— h2 已被内核删除，写进去也不会生效。
+          if (this.form.transport === TransportKind.TCP.toString()) {
             NodeSelectField({
               label: $r('app.string.node_label_raw_header'),
               options: RAW_HEADER_OPTIONS,
@@ -486,6 +492,56 @@ export struct NodeEditSheet {
               isOn: this.form.allowInsecure,
               onToggle: (value: boolean) => {
                 this.form.allowInsecure = value;
+              }
+            })
+            // 已废弃特性的告警，语义对齐 v2rayN 的 NodeValidator（只警告、不拦保存）
+            if (this.form.deprecatedInsecure()) {
+              Text($r('app.string.node_allow_insecure_deprecated'))
+                .fontSize(FontSizes.caption)
+                .fontColor(Theme.warning)
+                .width('100%')
+            }
+          }
+
+          // 以下四个只存在于 tlsSettings（内核 TLSConfig），REALITY 有自己的 settings
+          if (this.form.hasPlainTlsField()) {
+            NodeTextField({
+              label: $r('app.string.node_label_pinned_cert_sha'),
+              value: this.form.pinnedPeerCertSha256,
+              placeholder: $r('app.string.node_placeholder_pinned_cert_sha'),
+              onValue: (value: string) => {
+                this.form.pinnedPeerCertSha256 = value;
+              }
+            })
+            NodeTextField({
+              label: $r('app.string.node_label_verify_cert_name'),
+              value: this.form.verifyPeerCertByName,
+              placeholder: $r('app.string.node_placeholder_verify_cert_name'),
+              onValue: (value: string) => {
+                this.form.verifyPeerCertByName = value;
+              }
+            })
+            NodeTextField({
+              label: $r('app.string.node_label_ech_config'),
+              value: this.form.echConfigList,
+              placeholder: $r('app.string.node_placeholder_empty'),
+              onValue: (value: string) => {
+                this.form.echConfigList = value;
+              }
+            })
+            NodeSwitchField({
+              label: $r('app.string.node_label_disable_system_root'),
+              isOn: this.form.disableSystemRoot,
+              onToggle: (value: boolean) => {
+                this.form.disableSystemRoot = value;
+              }
+            })
+            NodeTextField({
+              label: $r('app.string.node_label_tls_certificates'),
+              value: this.form.tlsCertificates,
+              placeholder: $r('app.string.node_placeholder_tls_certificates'),
+              onValue: (value: string) => {
+                this.form.tlsCertificates = value;
               }
             })
           }

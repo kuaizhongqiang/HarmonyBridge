@@ -42,8 +42,36 @@ export interface ServerNode {
   spiderX: string;
   /** ALPN，逗号分隔 */
   alpn: string;
-  /** 跳过证书校验（对应 v2rayN 的 allowInsecure） */
+  /**
+   * 跳过证书校验（v2rayN 的 `AllowInsecure`）。
+   *
+   * ⚠️ 本版内核**已删除**该特性：`infra/conf/transport_internet.go:709-716` 在
+   * 2026-06-01 之后遇到 `allowInsecure: true` 会直接让**整份配置**加载失败
+   * （`PrintRemovedFeatureError`）。因此它只用于**导入兼容**（分享链接的
+   * `insecure=1` 要能读进来、再原样导出），生成配置时一律不写入并给出告警。
+   * 真正的替代手段是下面三个字段。
+   */
   allowInsecure: boolean;
+  /**
+   * 证书公钥钉扎（v2rayN `CertSha` / 分享链接 `pcs` / 内核 `pinnedPeerCertSha256`）。
+   * 必须是 64 位十六进制 sha256，可逗号分隔多个；长度不对内核会拒绝整份配置。
+   */
+  pinnedPeerCertSha256: string;
+  /**
+   * 按名称校验对方证书（v2rayN `VerifyPeerCertByName` / 分享链接 `vcn` /
+   * 内核 `verifyPeerCertByName`），逗号分隔多个名称。
+   */
+  verifyPeerCertByName: string;
+  /** 不信任系统根证书（内核 `tlsSettings.disableSystemRoot`） */
+  disableSystemRoot: boolean;
+  /** ECH 配置（v2rayN `EchConfigList` / 分享链接 `ech` / 内核 `echConfigList`） */
+  echConfigList: string;
+  /**
+   * 客户端证书链（内核 `tlsSettings.certificates[]`）。
+   * 形如 `[{"usage":"verify","certificate":["-----BEGIN CERTIFICATE-----..."]}]` 的
+   * **JSON 文本**，与 `xhttpExtra` / `finalmask` 同一套处理方式（高级字段不拆表单）。
+   */
+  tlsCertificates: string;
 
   /** raw/tcp 伪装类型（v2rayN TransportExtra.RawHeaderType） */
   rawHeaderType: string;
@@ -128,6 +156,11 @@ export function createEmptyNode(id: NodeId, now: Timestamp): ServerNode {
     spiderX: '',
     alpn: '',
     allowInsecure: false,
+    pinnedPeerCertSha256: '',
+    verifyPeerCertByName: '',
+    disableSystemRoot: false,
+    echConfigList: '',
+    tlsCertificates: '',
     rawHeaderType: 'none',
     kcpHeaderType: 'none',
     xhttpMode: 'auto',
@@ -184,6 +217,11 @@ export interface NodeJson {
   fingerprint: string;
   alpn: string;
   allowInsecure: boolean;
+  pinnedPeerCertSha256: string;
+  verifyPeerCertByName: string;
+  disableSystemRoot: boolean;
+  echConfigList: string;
+  tlsCertificates: string;
   publicKey: string;
   shortId: string;
   spiderX: string;
@@ -218,6 +256,11 @@ export function nodeToJson(node: ServerNode): NodeJson {
     fingerprint: node.fingerprint,
     alpn: node.alpn,
     allowInsecure: node.allowInsecure,
+    pinnedPeerCertSha256: node.pinnedPeerCertSha256,
+    verifyPeerCertByName: node.verifyPeerCertByName,
+    disableSystemRoot: node.disableSystemRoot,
+    echConfigList: node.echConfigList,
+    tlsCertificates: node.tlsCertificates,
     publicKey: node.publicKey,
     shortId: node.shortId,
     spiderX: node.spiderX,
@@ -255,6 +298,11 @@ export function cloneNode(node: ServerNode): ServerNode {
   copy.spiderX = node.spiderX;
   copy.alpn = node.alpn;
   copy.allowInsecure = node.allowInsecure;
+  copy.pinnedPeerCertSha256 = node.pinnedPeerCertSha256;
+  copy.verifyPeerCertByName = node.verifyPeerCertByName;
+  copy.disableSystemRoot = node.disableSystemRoot;
+  copy.echConfigList = node.echConfigList;
+  copy.tlsCertificates = node.tlsCertificates;
   copy.rawHeaderType = node.rawHeaderType;
   copy.kcpHeaderType = node.kcpHeaderType;
   copy.xhttpMode = node.xhttpMode;

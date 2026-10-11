@@ -526,6 +526,22 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
    `finalmask`）。这些在 `build.go` 里都有对应的挡板与 `notes`，反向断言见
    `config_test.go` 的 `TestRemovedFeaturesAreRejectedByCore`。
 
+   5.1（2026-10-11 后续）**挡板从"生成时报错"下沉到"UI 里就不给选"**，并补齐
+   `allowInsecure` 的替代字段。此前的问题不是挡住了，而是**三处自相矛盾**：
+   UI 下拉仍提供 `h2`/`quic`、分享链接解析也接受它们，一路走到生成才失败；同时
+   UI 有一个 `allowInsecure` 开关、内核却已把它变成"写入即整份配置失效"。
+   现在：
+   - `constants/NodeOptions.ets#TRANSPORT_OPTIONS` 与 v2rayN 的 `Global.Networks`
+     逐项一致（`tcp/ws/grpc/httpupgrade/xhttp/kcp`，不含 h2/quic）；
+     `TransportKind.H2/QUIC` 仅保留用于忠实解析导入链接 + 精确报错；
+   - `TLSSettings` 补齐 `pinnedPeerCertSha256` / `verifyPeerCertByName` /
+     `disableSystemRoot` / `echConfigList` / `certificates`（对齐 v2rayN 的
+     `Models/CoreConfigs/V2rayConfig.cs:342-346`），`allowInsecure` 明确降级为
+     "导入兼容 + 告警、绝不落配置"（语义同 v2rayN `NodeValidator.cs:135-144`）；
+   - 新增 `TestTlsReplacementFieldsReachStreamSettings` /
+     `TestTlsCertificatesJSONIsValidated`，两者都带反向断言。
+   UI 侧说明见 [`ui.md`](ui.md) §5.6。
+
 ## 8. 测试与验收
 
 宿主侧（已具备）：

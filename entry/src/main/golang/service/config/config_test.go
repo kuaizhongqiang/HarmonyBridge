@@ -46,6 +46,11 @@ const arktsNodeJSON = `{
   "fingerprint": "chrome",
   "alpn": "",
   "allowInsecure": false,
+  "pinnedPeerCertSha256": "aabbccdd",
+  "verifyPeerCertByName": "example.com",
+  "disableSystemRoot": true,
+  "echConfigList": "AEX+DQBB",
+  "tlsCertificates": "[{\"usage\":\"verify\"}]",
   "publicKey": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
   "shortId": "ab12",
   "spiderX": "/",
@@ -88,6 +93,11 @@ func TestParseNodeMatchesArktsFieldNames(t *testing.T) {
 		{"kcpHeaderType", node.KCPHeaderType, "none"},
 		{"xhttpMode", node.XHTTPMode, "auto"},
 		{"grpcMode", node.GRPCMode, "gun"},
+		// allowInsecure 的替代字段（v2rayN TLS 面板 / 分享链接 pcs·vcn·ech）
+		{"pinnedPeerCertSha256", node.PinnedPeerCertSha256, "aabbccdd"},
+		{"verifyPeerCertByName", node.VerifyPeerCertByName, "example.com"},
+		{"echConfigList", node.ECHConfigList, "AEX+DQBB"},
+		{"tlsCertificates", node.TLSCertificates, `[{"usage":"verify"}]`},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -100,6 +110,9 @@ func TestParseNodeMatchesArktsFieldNames(t *testing.T) {
 	}
 	if !node.MuxEnabled {
 		t.Error("muxEnabled: got false want true")
+	}
+	if !node.DisableSystemRoot {
+		t.Error("disableSystemRoot: got false want true")
 	}
 }
 
@@ -303,6 +316,78 @@ func TestAllowInsecureIsDroppedWithNote(t *testing.T) {
 	}
 	if !hasNote(notes, "allowInsecure") {
 		t.Errorf("缺少 allowInsecure 的 note: %v", notes)
+	}
+}
+
+// TestTlsReplacementFieldsReachStreamSettings 守住安全层新增的替代字段。
+//
+// 背景：本版内核删除了 allowInsecure，官方替代是 pinnedPeerCertSha256（pcs）与
+// verifyPeerCertByName（vcn）（infra/conf/transport_internet.go:709-716）。
+// v2rayN 的 TLS 面板还额外写出 disableSystemRoot / echConfigList / certificates
+// （Models/CoreConfigs/V2rayConfig.cs:342-346）。这四类字段必须真的落到
+// tlsSettings 里，而不是像 allowInsecure 那样只停在 UI 上。
+func TestTlsReplacementFieldsReachStreamSettings(t *testing.T) {
+	// 内核要求 pcs 的每一项是 32 字节（64 位十六进制）sha256；长度不对会拒绝整份配置。
+	pinned := strings.Repeat("0123456789abcdef", 4)
+	n := node("vless")
+	n.Security = "tls"
+	n.SNI = "www.example.com"
+	n.Transport = "ws"
+	n.Host = "www.example.com"
+	n.Path = "/ws"
+	n.PinnedPeerCertSha256 = pinned
+	n.VerifyPeerCertByName = "example.com,www.example.com"
+	n.DisableSystemRoot = true
+	n.ECHConfigList = "AEX+DQBB0gAgACC"
+
+	text, _ := mustMarshal(t, n, "rule")
+	wants := []string{
+		`"pinnedPeerCertSha256": "` + pinned + `"`,
+		`"verifyPeerCertByName": "example.com,www.example.com"`,
+		`"disableSystemRoot": true`,
+		`"echConfigList": "AEX+DQBB0gAgACC"`,
+	}
+	for _, want := range wants {
+		if !strings.Contains(text, want) {
+			t.Errorf("生成的配置里缺少 %s\n----\n%s", want, text)
+		}
+	}
+	mustLoad(t, text)
+
+	// 反向断言：长度非法的 pcs 必须被内核拒绝 —— 这样上面的"正向通过"才有意义
+	// （否则可能是内核根本没读这个字段）。
+	bad := node("vless")
+	bad.Security = "tls"
+	bad.SNI = "www.example.com"
+	bad.PinnedPeerCertSha256 = "aabb"
+	badText, _ := mustMarshal(t, bad, "rule")
+	if _, err := xcore.LoadConfig("json", bytes.NewReader([]byte(badText))); err == nil {
+		t.Error("长度非法的 pinnedPeerCertSha256 竟然被内核接受了，该字段的断言失去意义")
+	}
+}
+
+// TestTlsCertificatesJSONIsValidated 断言 certificates 是透传但没有被"放羊"：
+// 合法 JSON 数组能进配置，非法 JSON 在生成阶段就被挡住（不留给内核报错）。
+func TestTlsCertificatesJSONIsValidated(t *testing.T) {
+	good := node("vless")
+	good.Security = "tls"
+	good.SNI = "www.example.com"
+	// 必须给 `certificate`（字符串形式）而不是 `certificateFile`：
+	// 内核的 readFileOrString（infra/conf/transport_internet.go:568-576）在
+	// 两者都为空时会直接报错，而填文件路径会在构建期真的去读盘。
+	good.TLSCertificates = `[{"usage":"verify","certificate":["-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"]}]`
+	text, _ := mustMarshal(t, good, "global")
+	if !strings.Contains(text, `"certificates"`) {
+		t.Errorf("certificates 没有被写进 tlsSettings:\n%s", text)
+	}
+	mustLoad(t, text)
+
+	bad := node("vless")
+	bad.Security = "tls"
+	bad.SNI = "www.example.com"
+	bad.TLSCertificates = `{"usage":"verify"}`
+	if _, _, err := config.Build(bad, config.Options{RoutingMode: "global"}); err == nil {
+		t.Error("tlsCertificates 填了一个 JSON 对象（不是数组）却通过了生成，应该在生成阶段挡住")
 	}
 }
 

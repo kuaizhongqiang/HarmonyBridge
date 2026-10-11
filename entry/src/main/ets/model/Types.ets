@@ -25,13 +25,27 @@ export enum ProxyProtocol {
   UNKNOWN = 'unknown'
 }
 
-/** 传输层类型（对齐 v2rayN 的 Network 字段） */
+/**
+ * 传输层类型（对齐 v2rayN 的 `Network` 字段）。
+ *
+ * ⚠️ `H2` 与 `QUIC` 在本版内核（xray-core v1.260327.0）里**已被删除**：
+ * `infra/conf/transport_internet.go:1015-1018` 对 `h2`/`h3`/`http`/`quic` 直接
+ * 走 `PrintRemovedFeatureError`。v2rayN 的 `Global.Networks`（Global.cs:331-339）
+ * 也**只保留** `raw / xhttp / kcp / grpc / ws / httpupgrade`。
+ *
+ * 因此这两个取值**不出现在表单下拉里**（见 constants/NodeOptions.ets 的
+ * TRANSPORT_OPTIONS）。保留枚举的意义是：导入一份含 `type=h2` 的分享链接时
+ * 仍能**忠实记录**它的传输方式，从而在生成配置时给出精确报错（"已被内核删除，
+ * 改用 XHTTP stream-one"），而不是静默降级成 tcp 去连一个连不上的东西。
+ */
 export enum TransportKind {
   TCP = 'tcp',
   WS = 'ws',
   GRPC = 'grpc',
   HTTP_UPGRADE = 'httpupgrade',
+  /** 内核已删除；仅用于忠实解析与精确报错，不可选 */
   H2 = 'h2',
+  /** 内核已删除；仅用于忠实解析与精确报错，不可选 */
   QUIC = 'quic',
   KCP = 'kcp',
   XHTTP = 'xhttp',

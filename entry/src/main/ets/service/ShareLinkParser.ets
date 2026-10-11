@@ -103,7 +103,9 @@ function splitFragment(link: string): string[] {
  * 支持 vless/trojan/hysteria2 的常见参数：
  *   type/security/sni/host/path/serviceName/flow/pbk/sid/spx/fp/alpn/encryption
  *   headertype（raw / kcp 伪装类型）、mode（XHTTP / gRPC 模式）、extra（XHTTP extra）
- *   insecure/allowinsecure（跳过证书校验）、fm（Finalmask）、mux（Mux 开关）
+ *   insecure/allowinsecure（跳过证书校验，已废弃）、fm（Finalmask）、mux（Mux 开关）
+ *   pcs（证书公钥钉扎）/ vcn（按名校验证书）/ ech（ECH 配置）
+ *   —— 这三个的 key 名与 v2rayN 的 `BaseFmt.cs:67-77/209-211` 完全一致。
  *
  * `mode` 在 v2rayN 里同时用于 gRPC 与 XHTTP，具体落到哪个字段取决于**最终**的传输方式，
  * 而查询串里 `mode` 可能出现在 `type` 之前，所以先记在局部变量里，循环结束后再归属。
@@ -164,6 +166,12 @@ export function applyQueryOptions(node: ServerNode, query: string): void {
       node.xhttpExtra = value;
     } else if (key === 'insecure' || key === 'allowinsecure') {
       node.allowInsecure = value.toLowerCase() === 'true' || value === '1';
+    } else if (key === 'pcs') {
+      node.pinnedPeerCertSha256 = value;
+    } else if (key === 'vcn') {
+      node.verifyPeerCertByName = value;
+    } else if (key === 'ech') {
+      node.echConfigList = value;
     } else if (key === 'fm' || key === 'finalmask') {
       node.finalmask = value;
     } else if (key === 'mux') {
@@ -277,6 +285,12 @@ function parseVmess(raw: string, id: NodeId, now: Timestamp): ServerNode | undef
   node.sni = jsonStr(parsed, 'sni');
   node.alpn = jsonStr(parsed, 'alpn');
   node.fingerprint = jsonStr(parsed, 'fp');
+  // TLS 替代字段（key 名对齐 v2rayN 的 VmessFmt.cs:70-71 / 146-147）
+  node.verifyPeerCertByName = jsonStr(parsed, 'vcn');
+  node.pinnedPeerCertSha256 = jsonStr(parsed, 'pcs');
+  if (jsonStr(parsed, 'insecure') === '1') {
+    node.allowInsecure = true;
+  }
   // vmess 的 type 是「伪装类型」：kcp 与 raw/tcp 共用，按传输方式归属
   const headerText: string = jsonStr(parsed, 'type');
   if (headerText.length > 0) {

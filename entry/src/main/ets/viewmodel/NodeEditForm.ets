@@ -85,7 +85,13 @@ export class NodeEditForm {
   @Trace sni: string = '';
   @Trace fingerprint: string = '';
   @Trace alpn: string = '';
+  /** 已废弃（内核已删除 allowInsecure）；仅作导入兼容，见下方 deprecatedInsecure() */
   @Trace allowInsecure: boolean = false;
+  @Trace pinnedPeerCertSha256: string = '';
+  @Trace verifyPeerCertByName: string = '';
+  @Trace disableSystemRoot: boolean = false;
+  @Trace echConfigList: string = '';
+  @Trace tlsCertificates: string = '';
   @Trace publicKey: string = '';
   @Trace shortId: string = '';
   @Trace spiderX: string = '';
@@ -130,6 +136,11 @@ export class NodeEditForm {
     form.fingerprint = copy.fingerprint;
     form.alpn = copy.alpn;
     form.allowInsecure = copy.allowInsecure;
+    form.pinnedPeerCertSha256 = copy.pinnedPeerCertSha256;
+    form.verifyPeerCertByName = copy.verifyPeerCertByName;
+    form.disableSystemRoot = copy.disableSystemRoot;
+    form.echConfigList = copy.echConfigList;
+    form.tlsCertificates = copy.tlsCertificates;
     form.publicKey = copy.publicKey;
     form.shortId = copy.shortId;
     form.spiderX = copy.spiderX;
@@ -167,6 +178,11 @@ export class NodeEditForm {
     node.fingerprint = this.fingerprint;
     node.alpn = this.alpn.trim();
     node.allowInsecure = this.allowInsecure;
+    node.pinnedPeerCertSha256 = this.pinnedPeerCertSha256.trim();
+    node.verifyPeerCertByName = this.verifyPeerCertByName.trim();
+    node.disableSystemRoot = this.disableSystemRoot;
+    node.echConfigList = this.echConfigList.trim();
+    node.tlsCertificates = this.tlsCertificates.trim();
     node.publicKey = this.publicKey.trim();
     node.shortId = this.shortId.trim();
     node.spiderX = this.spiderX.trim();
@@ -203,6 +219,25 @@ export class NodeEditForm {
   /** 是否处于 TLS / REALITY（决定 SNI / 指纹等字段是否展示） */
   hasTlsField(): boolean {
     return this.security !== SecurityKind.NONE.toString();
+  }
+
+  /**
+   * 是否处于**纯 TLS**（`disableSystemRoot` / `echConfigList` / `certificates` 只存在于
+   * `tlsSettings`；REALITY 有自己的一套 settings，见 build.go 的 `case "reality"`）。
+   */
+  hasPlainTlsField(): boolean {
+    return this.security === SecurityKind.TLS.toString();
+  }
+
+  /**
+   * 是否开着已废弃的 `allowInsecure`。
+   *
+   * 语义对齐 v2rayN 的 `NodeValidator`（`ServiceLib/Handler/Builder/NodeValidator.cs:135-144`）：
+   * 它在 `allowInsecure == true` 时只发**警告**（`MsgAllowInsecureDeprecated`），不拦保存 ——
+   * 因为链接导入/导出需要这个字段活着。我们据此在表单上给出同等的告警文案。
+   */
+  deprecatedInsecure(): boolean {
+    return this.allowInsecure;
   }
 }
 

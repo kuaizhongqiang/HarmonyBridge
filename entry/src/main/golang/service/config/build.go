@@ -67,7 +67,14 @@ type Node struct {
 	Fingerprint    string `json:"fingerprint"`
 	ALPN           string `json:"alpn"`
 	AllowInsecure  bool   `json:"allowInsecure"`
-	PublicKey      string `json:"publicKey"`
+	// allowInsecure 的三个替代字段（v2rayN 面板与分享链接 pcs/vcn 都指向它们）。
+	PinnedPeerCertSha256 string `json:"pinnedPeerCertSha256"`
+	VerifyPeerCertByName string `json:"verifyPeerCertByName"`
+	DisableSystemRoot    bool   `json:"disableSystemRoot"`
+	ECHConfigList        string `json:"echConfigList"`
+	// TLSCertificates 是 certificates[] 的 JSON 文本（形状见内核 TLSCertConfig）。
+	TLSCertificates string `json:"tlsCertificates"`
+	PublicKey       string `json:"publicKey"`
 	ShortID        string `json:"shortId"`
 	SpiderX        string `json:"spiderX"`
 	UserID         string `json:"userId"`
@@ -154,7 +161,9 @@ type MuxConfig struct {
 //
 // 注意这里**故意没有** TLS 的 allowInsecure：该版本内核已把它删掉
 // （infra/conf/transport_internet.go:711 PrintRemovedFeatureError），
-// 写进去会让整个配置被 loader 拒绝。见 notes 里的提示。
+// 写进去会让整个配置被 loader 拒绝。替代手段是 TLSSettings 里的
+// pinnedPeerCertSha256 / verifyPeerCertByName / disableSystemRoot / certificates。
+// 见 notes 里的提示。
 type StreamSettings struct {
 	Network             string             `json:"network,omitempty"`
 	Security            string             `json:"security,omitempty"`
@@ -170,10 +179,29 @@ type StreamSettings struct {
 }
 
 // TLSSettings 对应 infra/conf/transport_internet.go 的 TLSConfig（客户端相关字段）。
+//
+// 这里对齐的是 v2rayN TLS 面板真正写出的字段集（`Models/CoreConfigs/V2rayConfig.cs:342-346`）：
+// serverName / alpn / fingerprint / certificates / verifyPeerCertByName /
+// pinnedPeerCertSha256 / disableSystemRoot / echConfigList。
+// **不含 allowInsecure** —— 见下方字段注释。
 type TLSSettings struct {
 	ServerName  string   `json:"serverName,omitempty"`
 	ALPN        []string `json:"alpn,omitempty"`
 	Fingerprint string   `json:"fingerprint,omitempty"`
+	// PinnedPeerCertSha256 是 allowInsecure 的官方替代之一（内核又称 "pcs"）。
+	// 内核会校验：逗号分隔的每一项必须是 32 字节（64 位十六进制）sha256，
+	// 否则整份配置被拒（infra/conf/transport_internet.go:717-733）。
+	PinnedPeerCertSha256 string `json:"pinnedPeerCertSha256,omitempty"`
+	// VerifyPeerCertByName 是另一个替代（"vcn"），按证书名验证，逗号分隔。
+	VerifyPeerCertByName string `json:"verifyPeerCertByName,omitempty"`
+	// DisableSystemRoot 不信任系统根证书（内核 line 698 直接赋值，无额外校验）。
+	DisableSystemRoot bool `json:"disableSystemRoot,omitempty"`
+	// ECHConfigList 是 ECH 配置（内核 line 762 直接赋值，无额外校验）。
+	ECHConfigList string `json:"echConfigList,omitempty"`
+	// Certificates 是透传的 certificates[]：字段形状由内核 TLSCertConfig 定义
+	// （usage / certificate / key / ...）。我们只做严格 JSON 解析、不做字段级建模，
+	// 与 xhttpExtra / finalmask 同一套策略。
+	Certificates []any `json:"certificates,omitempty"`
 }
 
 // RealitySettings 对应 infra/conf/transport_internet.go 的 REALITYConfig（客户端字段）。
@@ -571,16 +599,31 @@ func buildStreamSettings(node *Node, notes *[]string) (*StreamSettings, error) {
 		stream.Security = "none"
 	case "tls":
 		stream.Security = "tls"
-		tls := &TLSSettings{
+		tlsSettings := &TLSSettings{
 			ServerName:  firstNonEmpty(node.SNI, node.Host),
 			ALPN:        splitList(node.ALPN),
 			Fingerprint: node.Fingerprint,
 		}
-		stream.TLSSettings = tls
+		// allowInsecure 在本版内核里是**硬失败**（不是"被忽略"）：2026-06-01 之后
+		// 写入它会让 loader 拒绝整份配置（infra/conf/transport_internet.go:709-716
+		// 的 PrintRemovedFeatureError）。所以一律不写、只告警，并指引到替代字段。
 		if node.AllowInsecure {
 			*notes = append(*notes,
-				"allowInsecure 已被内核删除（改为 pinnedPeerCertSha256），本次未写入")
+				"allowInsecure 已被内核删除，本次未写入；请改用 pinnedPeerCertSha256（pcs）"+
+					"或 verifyPeerCertByName（vcn）")
 		}
+		tlsSettings.PinnedPeerCertSha256 = strings.TrimSpace(node.PinnedPeerCertSha256)
+		tlsSettings.VerifyPeerCertByName = strings.TrimSpace(node.VerifyPeerCertByName)
+		tlsSettings.DisableSystemRoot = node.DisableSystemRoot
+		tlsSettings.ECHConfigList = strings.TrimSpace(node.ECHConfigList)
+		if certificatesText := strings.TrimSpace(node.TLSCertificates); certificatesText != "" {
+			var certificates []any
+			if err := json.Unmarshal([]byte(certificatesText), &certificates); err != nil {
+				return nil, fmt.Errorf("tlsCertificates 不是合法的 JSON 数组: %w", err)
+			}
+			tlsSettings.Certificates = certificates
+		}
+		stream.TLSSettings = tlsSettings
 	case "reality":
 		if strings.TrimSpace(node.PublicKey) == "" {
 			return nil, errors.New("reality requires publicKey")

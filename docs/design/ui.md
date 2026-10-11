@@ -306,10 +306,40 @@ export const CoreAvailable: () => string;
 | 基础 | 分组（`subscriptionName` == v2rayN 的 `Subid`）、别名、协议、地址、端口 |
 | 协议参数 | 用户 ID（含「生成」UUID 按钮）、密码、加密方式、alterId、flow、开启 Mux |
 | 底层传输方式 | 传输协议、Host、路径、serviceName、raw 伪装类型、kcp 伪装类型、gRPC 模式、XHTTP 模式、XHTTP extra、Finalmask |
-| 传输层安全 | 传输层安全（none/tls/reality）、SNI、Fingerprint、Alpn、跳过证书验证、PublicKey、ShortId、SpiderX |
+| 传输层安全 | 传输层安全（none/tls/reality）、SNI、Fingerprint、Alpn、跳过证书验证（**已废弃，只告警**）、PublicKey、ShortId、SpiderX |
+| 传输层安全（仅 `tls`） | `pinnedPeerCertSha256`、`verifyPeerCertByName`、ECH (`echConfigList`)、`disableSystemRoot`、`certificates`（JSON 文本） |
 
 `ServerNode` 因此新增字段：`muxEnabled` / `rawHeaderType` / `kcpHeaderType` / `grpcMode` /
 `xhttpMode` / `xhttpExtra` / `finalmask` / `allowInsecure` / `spiderX`。
+
+### 5.6 传输方式与 TLS：两处对齐 v2rayN 的修正（2026-10-11）
+
+**(a) 传输方式下拉不再提供 `h2` / `quic`。**
+`constants/NodeOptions.ets` 的 `TRANSPORT_OPTIONS` 现在与 v2rayN 的
+`Global.Networks`（`Global.cs:331-339`）**逐项一致**：`tcp / ws / grpc / httpupgrade / xhttp / kcp`。
+本版内核已在 `infra/conf/transport_internet.go:1015-1018` 用 `PrintRemovedFeatureError`
+删除了 `h2` / `h3` / `http` / `quic`，把它们留在下拉里等于提供一个必然失败的选项。
+`TransportKind.H2/QUIC` 枚举值**保留**，用途只有一个：导入含 `type=h2` 的分享链接时仍能忠实
+记录并给出精确报错（`build.go` 返回"已被内核删除，改用 XHTTP stream-one"），而不是静默降级成 tcp。
+表单用 `transportOptionsFor(current)`：当前值不在可选列表时把它顶到首位如实显示。
+另外 raw 伪装类型只跟着 `tcp` 显示（内核只在 raw/tcp 下读它）。
+
+**(b) `allowInsecure` 被降级为「导入兼容 + 告警」，取而代之的是四个真实字段。**
+本版内核在 `2026-06-01` 之后遇到 `allowInsecure: true` 会**直接拒绝整份配置**
+（`infra/conf/transport_internet.go:709-716` `PrintRemovedFeatureError`），所以它不是一个
+"能生效的开关"。处理方式与 v2rayN 一致 —— v2rayN 的 `NodeValidator.cs:135-144` 也只发
+`MsgAllowInsecureDeprecated` 警告、不拦保存，因为它还要负责链接的导入/导出：
+
+- 字段保留在 `ServerNode` 里（分享链接的 `insecure=1` / `pcs` / `vcn` 要能读进来再原样导出）；
+- 表单保留开关，但打开时在下方显示告警文案（`node_allow_insecure_deprecated`）；
+- 生成配置时一律不写入，并往 `notes` 里追加一条含替代方案名的提示；
+- 真正生效的是 `pinnedPeerCertSha256`（链接 `pcs`）/ `verifyPeerCertByName`（`vcn`）/
+  `echConfigList`（`ech`）/ `disableSystemRoot` / `certificates`，字段集对齐 v2rayN 的
+  `Models/CoreConfigs/V2rayConfig.cs:342-346`。
+
+> 注意 `pinnedPeerCertSha256` 的内核约束：逗号分隔的每一项必须是 32 字节（64 位十六进制）
+> sha256，长度不对整份配置会被拒（`transport_internet.go:717-733`）。我们不做前置校验，
+> 靠生成后的 `xcore.LoadConfig` 自检把内核的原话回传（🧪 已在 `config_test.go` 里用反向断言固化）。
 
 **为什么没有单独的「分组名」字段**：v2rayN 的 `ProfileItem` 本身没有组名字符串，它用 `Subid`
 表示节点属于哪一份配置项；本项目对应 `subscriptionId` + `subscriptionName`。
@@ -320,6 +350,9 @@ export const CoreAvailable: () => string;
 - `service/ShareLinkParser.ets`：`applyQueryOptions` 新增 `headertype` / `mode` / `extra` /
   `insecure|allowinsecure` / `fm|finalmask` / `mux` / `spx`；vmess JSON 的 `type` 按传输方式
   落到 `rawHeaderType` 或 `kcpHeaderType`。
+  后续又补了 `pcs`（证书公钥钉扎）/ `vcn`（按名校验证书）/ `ech`（ECH），三个 key 名与
+  v2rayN 的 `Handler/Fmt/BaseFmt.cs:67-77,209-211` 完全一致；vmess JSON 侧读 `pcs` / `vcn` /
+  `insecure`（`VmessFmt.cs:70-71,146-147`）。
 - `service/SubscriptionParser.ets`：Clash 条目新增 `skip-cert-verify` / `client-fingerprint` /
   `alpn` / `header-type`，并把这些字段带进拼接出的分享链接。
 - `service/NodeValidator.ets`：去重关键字补上 `sni` / `publicKey` / `shortId`（同一台服务器上不同
@@ -334,4 +367,11 @@ export const CoreAvailable: () => string;
 
 **验证状态**：ArkTS 侧已通过一次**全量 clean 构建**（🧪 2026-10-11，`hvigorw clean` + `assembleHap`
 → `32 executed`，产出 2.4 MB 未签名 HAP，`BUILD SUCCESSFUL`）；原生侧 `go build` / `go vet` /
-`go test` 通过（🧪）。**两侧均未在真机上运行过**。
+`go test` 通过（🧪）。
+
+§5.6 这两处修正之后又验过一次（🧪 同日）：`CompileArkTS` **实际执行** 7.29s（不是 `UP-TO-DATE`）
+→ `BUILD SUCCESSFUL`，`19 executed / 14 up-to-date`；`go build` / `go vet` / `go test ./...` 全绿，
+其中新增的 `TestTlsReplacementFieldsReachStreamSettings` 与 `TestTlsCertificatesJSONIsValidated`
+都带**反向断言**（长度非法的 `pcs`、非数组的 `certificates` 必须被拒），避免测试变成空转。
+
+**两侧均未在真机上运行过。**
