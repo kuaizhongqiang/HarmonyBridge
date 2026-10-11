@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# Reference-only submodules.
+#
+# These are NOT build inputs. They exist so that the port can be designed
+# against the real upstream behaviour (information architecture, routing
+# semantics, config schema) without vendoring any upstream source into this
+# repository.
+#
+# LICENSING: third_party/v2rayN is GPL-3.0 while this repository is MIT.
+# Do not copy code out of a reference submodule into the tree. See AGENT.md
+# ("许可与引用边界") and CONTRIBUTING.md before touching this.
+#
+# The pin never moves on its own: submodules only advance on an explicit
+# `git submodule update --remote`. Upstream v2rayN moves fast (multiple
+# commits a day), so an accidental jump would silently invalidate design
+# notes that cite specific upstream behaviour. Bump the pin deliberately,
+# as its own commit, and re-check the affected docs.
+# ---------------------------------------------------------------------------
+[submodule "third_party/v2rayN"]
+	path = third_party/v2rayN
+	url = https://github.com/2dust/v2rayN.git
+	branch = master
+	# Shallow clone: the upstream history is large and none of it is needed for
+	# reference purposes. `git submodule update --init` honours this flag, so a
+	# fresh clone stays fast.
+	shallow = true
