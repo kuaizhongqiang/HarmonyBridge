@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# Normalize line endings: the project is authored mainly on Windows but is
+# built by hvigor / NDK toolchains that expect LF in scripts and CMake files.
+# ---------------------------------------------------------------------------
+* text=auto eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.svg  text eol=lf
+
+# Shell / build scripts must stay LF, otherwise bash under WSL/Git-Bash and
+# the NDK build break with "bad interpreter: /bin/bash^M".
+*.sh   text eol=lf
+*.bash text eol=lf
+*.py   text eol=lf
+*.ts   text eol=lf
+*.ets  text eol=lf
+*.cpp  text eol=lf
+*.h    text eol=lf
+*.go   text eol=lf
+
+# Windows-only helpers keep CRLF so cmd.exe parses them correctly.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# ---------------------------------------------------------------------------
+# Git LFS: large binary blobs that must not enter normal Git history.
+# Run `git lfs install` once per machine (see docs/03-环境搭建.md).
+# ---------------------------------------------------------------------------
+*.so       filter=lfs diff=lfs merge=lfs -text
+*.dat      filter=lfs diff=lfs merge=lfs -text
+*.har      filter=lfs diff=lfs merge=lfs -text
+*.p12      filter=lfs diff=lfs merge=lfs -text
+
+# ---------------------------------------------------------------------------
+# Keep generated lock/linguist noise out of diffs and language stats.
+# ---------------------------------------------------------------------------
+oh-package-lock.json5 -diff linguist-generated=true
+*.pem -text
