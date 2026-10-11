@@ -130,7 +130,7 @@
     { "name": "settings_about_core", "value": "内核版本" },
     { "name": "settings_about_core_unknown", "value": "未知（MOCK）" },
     { "name": "settings_about_license", "value": "开源许可" },
-    { "name": "settings_about_license_value", "value": "GPL-3.0（参考 v2rayN）" },
+    { "name": "settings_about_license_value", "value": "MIT（内核 Xray-core 为 MPL-2.0）" },
     { "name": "settings_about_source", "value": "项目地址" },
 
     { "name": "logs_title", "value": "日志" },

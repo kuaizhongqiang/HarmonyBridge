@@ -114,7 +114,8 @@ export default class VpnAbility extends VpnExtensionAbility {
       });
     }
     // 扩展结束后主动退出进程，避免残留（否则系统会再次拉起上一次的 VPN 扩展）
-    process.ProcessManager().exit(0);
+    const processManager: process.ProcessManager = new process.ProcessManager();
+    processManager.exit(0);
   }
 
   // -------------------------------------------------------------------------

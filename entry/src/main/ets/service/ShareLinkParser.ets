@@ -14,7 +14,7 @@ import {
   protocolFromScheme
 } from '../model/Types';
 import { createEmptyNode, ServerNode } from '../model/ServerNode';
-import { jsonNum, jsonStr } from './JsonHelpers';
+import { jsonNum, jsonStr, jsonStrOr } from './JsonHelpers';
 import { Logger } from '../utils/Logger';
 
 const TAG: string = 'ShareLinkParser';

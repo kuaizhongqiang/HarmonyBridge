@@ -201,7 +201,7 @@ struct SettingsPage {
         Column() {
           // ---------------- 路由 ----------------
           SettingGroupTitle({ title: $r('app.string.settings_group_routing') })
-          this.Card(() => {
+          SettingsCard() {
             SettingValueRow({
               title: $r('app.string.settings_routing_mode'),
               value: this.routingModeText(),
@@ -225,11 +225,11 @@ struct SettingsPage {
                 this.vm.setCustomRulesEnabled(value);
               }
             })
-          })
+          }
 
           // ---------------- VPN / TUN ----------------
           SettingGroupTitle({ title: $r('app.string.settings_group_tun') })
-          this.Card(() => {
+          SettingsCard() {
             SettingSwitchRow({
               title: $r('app.string.settings_tun_enabled'),
               checked: this.vm.tunEnabled,
@@ -271,11 +271,11 @@ struct SettingsPage {
                 this.vm.setAllowLan(value);
               }
             })
-          })
+          }
 
           // ---------------- DNS / 嗅探 ----------------
           SettingGroupTitle({ title: $r('app.string.settings_group_dns') })
-          this.Card(() => {
+          SettingsCard() {
             SettingTextRow({
               title: $r('app.string.settings_dns_remote'),
               hint: $r('app.string.settings_dns_hint'),
@@ -309,11 +309,11 @@ struct SettingsPage {
                 this.vm.setSniffingOverride(value);
               }
             })
-          })
+          }
 
           // ---------------- 分应用代理 ----------------
           SettingGroupTitle({ title: $r('app.string.settings_group_app') })
-          this.Card(() => {
+          SettingsCard() {
             SettingValueRow({
               title: $r('app.string.settings_app_proxy_mode'),
               value: this.appProxyModeText(),
@@ -330,11 +330,11 @@ struct SettingsPage {
                 this.vm.setAppProxyListText(value);
               }
             })
-          })
+          }
 
           // ---------------- 日志 ----------------
           SettingGroupTitle({ title: $r('app.string.settings_group_log') })
-          this.Card(() => {
+          SettingsCard() {
             SettingValueRow({
               title: $r('app.string.settings_log_level'),
               value: this.vm.logLevel.toString().toUpperCase(),
@@ -350,11 +350,11 @@ struct SettingsPage {
                 this.vm.setLogToFile(value);
               }
             })
-          })
+          }
 
           // ---------------- 关于 ----------------
           SettingGroupTitle({ title: $r('app.string.settings_group_about') })
-          this.Card(() => {
+          SettingsCard() {
             SettingValueRow({
               title: $r('app.string.settings_about_app'),
               value: this.vm.appVersion,
@@ -378,7 +378,7 @@ struct SettingsPage {
               value: PROJECT_URL,
               clickable: false
             })
-          })
+          }
 
           // ---------------- 保存 / 恢复默认 ----------------
           Row({ space: Dimens.item }) {
@@ -417,11 +417,23 @@ struct SettingsPage {
     .backgroundColor(Theme.bg)
   }
 
-  /** 统一分组卡片外观 */
-  @Builder
-  Card(content: () => void) {
+}
+
+/**
+ * 分组卡片外壳（设置页六个分组共用）。
+ *
+ * 为什么是独立结构体而不是 `@Builder Card(content: () => void) { Column() { content() } }`：
+ * ArkUI 的 UI 语法校验不允许在 build / @Builder 体内直接调用「函数类型的参数」——
+ * 编译器报 `'content()' does not meet UI component syntax`。
+ * 传入 UI 结构的唯一受支持写法是 @BuilderParam + 尾随闭包（结构体）。
+ */
+@ComponentV2
+struct SettingsCard {
+  @BuilderParam contentSection: () => void;
+
+  build() {
     Column() {
-      content()
+      this.contentSection()
     }
     .width('100%')
     .padding({ left: Dimens.card, right: Dimens.card })

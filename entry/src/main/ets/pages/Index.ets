@@ -7,8 +7,8 @@
 import { common } from '@kit.AbilityKit';
 import { ConnectionState, RoutingMode } from '../model/Types';
 import { ServerNode, nodeEndpointText } from '../model/ServerNode';
-import { connectionViewModel } from '../viewmodel/ConnectionViewModel';
-import { nodeViewModel } from '../viewmodel/NodeViewModel';
+import { connectionViewModel, ConnectionViewModel } from '../viewmodel/ConnectionViewModel';
+import { nodeViewModel, NodeViewModel } from '../viewmodel/NodeViewModel';
 import { subscriptionViewModel } from '../viewmodel/SubscriptionViewModel';
 import { settingsViewModel } from '../viewmodel/SettingsViewModel';
 import { Dimens, FontSizes, Radii } from '../constants/Dimens';

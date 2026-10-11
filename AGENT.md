@@ -191,6 +191,23 @@ ArkTS 页面
 7. **跨 C 边界的 Go 代码不得 panic 逃逸。** `GoInvoke` 内部必须 `recover` 并把错误塞进信封，否则整个应用进程崩。
 8. **所有面向用户的文案走资源文件**（`$r('app.string.*')`），不得在 `.ets` 里硬编码中文字面量。
 
+### 3.1 编译器教给我们的 ArkTS 硬规则（✅ 均由真实编译验证，2026-10-11）
+
+这些是**编译器实际报错**才发现的，不是从文档抄的。踩过的坑不要再踩：
+
+| # | 规则 | 反例 → 正解 |
+|---|---|---|
+| 9 | **禁止索引访问字段**（`arkts-no-props-by-index`）。声明类型是 `Object`/class/interface 时，`obj['k']` 直接编译失败 | `result: Object` → `result: Record<string, Object>`；必要时写一个 `asFields()` 收窄辅助函数 |
+| 10 | **对象字面量必须挂到显式声明的类型**（`arkts-no-untyped-obj-literals`） | `return success({ version: v })` 报错 → 用带引号的 Record 字面量 `{ 'version': v }`，或声明 `interface` 后标注 |
+| 11 | **`direction` / `enabled` 等是 `CustomComponent` 的保留属性名**，组件里不能声明同名成员变量 | `@State direction` → `@State sortDirection`；`@State enabled` → `@State isEnabled` |
+| 12 | **`@Builder` / `build()` 体内不能调用「函数类型的参数」**。想做"把 UI 片段传进来"必须用 `@BuilderParam` + 尾随闭包 | `@Builder Card(content: () => void)` ❌ → 定义 `@ComponentV2 struct X { @BuilderParam contentSection: () => void }`，调用处 `X() { ... }` ✅（尾随闭包里的 `this` 仍绑定**父组件**） |
+| 13 | **NDK/`@kit` 类型要用对**：`router.Router` 不存在；类型要从 `@kit.ArkUI` 导入。`router.RouterOptions` 仍要保留 `@ohos.router` 的那个（与 `@system.router` 的同名类型不同） | `import { Router } from '@kit.ArkUI'` |
+| 14 | **`process.ProcessManager` 要 `new`**；`exit()` 是实例方法 | `new process.ProcessManager().exit(0)` |
+
+**验证方式**：`.ets` 的正确性**没有廉价替代品**，只有真编译才算数。纯 TypeScript 解析器**不可用**于
+含声明式 UI 的文件（`Column(){ }` 不是合法 TS），详见 [`docs/design/ci.md`](docs/design/ci.md) §6.2。
+**改完 UI 代码必须跑一次 `assembleHap`**（命令见 [`docs/03-环境搭建.md`](docs/03-环境搭建.md) §5.2）。
+
 ---
 
 ## 4. 仓库结构
@@ -308,18 +325,26 @@ Conventional Commits，由 `.githooks/commit-msg` 强制：
 
 ### 阻塞项（没有它就无法推进到"能跑"）—— 按严重度排序
 
-1. **B1 · 境内不可上架发行**（法律 + 备案 + 平台政策）。这不是"审核严一点"：
-   《计算机信息网络国际联网管理暂行规定》第六/十四条 + 工信部 APP 备案制度 + 平台明文不收录 VPN 类应用。
-   所有先例**无一例外走侧载**。**这是产品形态决策，必须由人先拍板**，详见
-   [`docs/research/03-合规与上架风险.md`](docs/research/03-合规与上架风险.md)。
+> **已决策（2026-10-11）：本项目仅供自用，不对外发行。**
+> 由此 B1 与 B4 从"阻塞"降级为"已定"：不做上架、不做分发，许可按 MIT + Xray-core(MPL-2.0) 即可，
+> 无需改用 GPL 内核。**但若将来改变主意要发行，必须重新评估下面这两条。**
+
+1. ~~**B1 · 境内不可上架发行**~~ → **已决策：不发行**。法律/备案/平台政策三条约束因此不再适用。
+   原始分析保留在 [`docs/research/03-合规与上架风险.md`](docs/research/03-合规与上架风险.md)，供改变主意时复核。
 2. **B2 · Go→OHOS 工具链受阻**：`socklen_t` 标准库冲突（无编译开关可解）+ cgo TLS 墙（运行期概率性 SIGSEGV）。
    需要**第三方 Go fork**（现役可用的是低星个人 fork）→ 引入供应链风险，**需人决策**。
+   这是当前**唯一**的真正技术阻塞。
 3. **B3 · 没有鸿蒙真机**（且模拟器大概率不支持 VPN、本机无镜像）。VPN 链路、授权弹窗、`vpn-tun`
-   虚拟网卡、内核接入，全部只能在真机上验证。
-4. **B4 · 许可决策未定**：本仓库 MIT、v2rayN GPL-3.0、Xray-core MPL-2.0、sing-box GPL-3.0。
-   **在集成核心之前必须决定**（想保 MIT 就只能从 MPL-2.0 的 Xray-core 起步）。
+   虚拟网卡、内核接入，全部只能在真机上验证。**设备预计数天内到位。**
+4. ~~**B4 · 许可决策未定**~~ → **已决策：自用，MIT + MPL-2.0 的 Xray-core**。
 5. **契约已冻结但实现未跟上**：见 [`docs/design/ipc-contract.md`](docs/design/ipc-contract.md) §5
    的《原生侧待收敛清单》。在此之前 `MOCK_BRIDGE` **必须保持 `true`**。
+
+### 已解除的疑问（不再当成风险）
+
+- ✅ **ArkTS + NAPI 桥能真实编译并打包**（2026-10-11 实测 `BUILD SUCCESSFUL`，产出 2.1 MB 未签名 HAP，
+  内含 `libs/arm64-v8a/libbridge.so`）。不需要真机就能验证这一层。命令见
+  [`docs/03-环境搭建.md`](docs/03-环境搭建.md) §5.2。
 
 ### 技术风险
 | 风险 | 影响 | 缓解 |

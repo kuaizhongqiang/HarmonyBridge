@@ -7,7 +7,7 @@
  * 因为每个页面都需要独立入口并注册进 main_pages.json，且 router 与 EntryAbility 的
  * `windowStage.loadContent('pages/Index')` 天然兼容（见 docs/design/ui.md）。
  */
-import { router } from '@kit.ArkUI';
+import { router, Router } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { LOG_DOMAIN, LOG_TAG } from './Common';
 
@@ -37,7 +37,7 @@ export interface RouteParams {
  */
 export class RouterHelper {
   /** 打开新页面（压栈） */
-  static push(routerInstance: router.Router, url: string, params?: RouteParams): void {
+  static push(routerInstance: Router, url: string, params?: RouteParams): void {
     const options: router.RouterOptions = { url: url };
     if (params !== undefined) {
       options.params = params;
@@ -48,12 +48,12 @@ export class RouterHelper {
   }
 
   /** 返回上一页 */
-  static back(routerInstance: router.Router): void {
+  static back(routerInstance: Router): void {
     routerInstance.back();
   }
 
   /** 清空栈并回到首页（用于错误兜底） */
-  static replaceToIndex(routerInstance: router.Router): void {
+  static replaceToIndex(routerInstance: Router): void {
     const options: router.RouterOptions = { url: Routes.INDEX };
     routerInstance.replaceUrl(options).catch((error: Error) => {
       hilog.error(LOG_DOMAIN, LOG_TAG, 'replace to index failed: %{public}s', error.message);

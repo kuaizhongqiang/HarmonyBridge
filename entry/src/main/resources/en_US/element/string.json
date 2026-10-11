@@ -130,7 +130,7 @@
     { "name": "settings_about_core", "value": "Core version" },
     { "name": "settings_about_core_unknown", "value": "unknown (MOCK)" },
     { "name": "settings_about_license", "value": "License" },
-    { "name": "settings_about_license_value", "value": "GPL-3.0 (v2rayN derived)" },
+    { "name": "settings_about_license_value", "value": "MIT (core: Xray-core, MPL-2.0)" },
     { "name": "settings_about_source", "value": "Project" },
 
     { "name": "logs_title", "value": "Logs" },

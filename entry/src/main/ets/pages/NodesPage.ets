@@ -4,7 +4,7 @@
  * 协议 / 别名 / 地址:端口 / 传输 / TLS / 延迟 / 测速。
  * 动作栏对齐 v2rayN：过滤、排序、测试延迟、快速测速（占位）。
  */
-import { nodeViewModel, NodeSortKey, SortDirection } from '../viewmodel/NodeViewModel';
+import { nodeViewModel, NodeViewModel, NodeSortKey, SortDirection } from '../viewmodel/NodeViewModel';
 import { ServerNode, nodeEndpointText } from '../model/ServerNode';
 import { NodeId, protocolTagText } from '../model/Types';
 import { Dimens, FontSizes, Radii } from '../constants/Dimens';
@@ -38,13 +38,13 @@ struct NodesPage {
     return NodeSortKey.DEFAULT;
   }
 
-  /** 排序方向 */
-  private direction(): SortDirection {
+  /** 排序方向（不能叫 direction：CustomComponent 基类已保留该属性名） */
+  private sortDirection(): SortDirection {
     return this.ascending ? SortDirection.ASC : SortDirection.DESC;
   }
 
   private applySort(): void {
-    this.vm.setSort(this.sortKey(), this.direction());
+    this.vm.setSort(this.sortKey(), this.sortDirection());
   }
 
   build() {

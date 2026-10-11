@@ -87,14 +87,30 @@ export class BridgeService {
 /** 原生返回的 JSON 信封 */
 export interface NativeEnvelope {
   success: boolean;
-  result: Object;
+  /**
+   * 结果对象。声明为 Record 而不是 Object：ArkTS 禁止对 Object 做下标访问
+   * （arkts-no-props-by-index），而 UI 侧必须按 key 读取结果字段。
+   * 字段名与冻结契约 docs/design/ipc-contract.md 完全一致，未做任何改名。
+   */
+  result: Record<string, Object>;
   error: string;
 }
 
-/** 空结果（Object 的最小实现） */
-function emptyResult(): Object {
-  const result: Record<string, string> = {};
+/** 空结果（最小可索引对象） */
+function emptyResult(): Record<string, Object> {
+  const result: Record<string, Object> = {};
   return result;
+}
+
+/**
+ * 把未知形状的 JSON 对象（Object）收窄成可索引的 Record。
+ * 原生信封的 result 字段在失败信封里可能缺失，因此这里同时兜底 undefined/null。
+ */
+function asFields(value: Object | undefined): Record<string, Object> {
+  if (value === undefined || value === null) {
+    return emptyResult();
+  }
+  return value as Record<string, Object>;
 }
 
 /** 组装失败信封 */
@@ -105,7 +121,7 @@ function failure(error: string): NativeEnvelope {
 
 /** 组装成功信封 */
 function success(result: Object): NativeEnvelope {
-  const envelope: NativeEnvelope = { success: true, result: result, error: '' };
+  const envelope: NativeEnvelope = { success: true, result: asFields(result), error: '' };
   return envelope;
 }
 
@@ -129,7 +145,7 @@ export function decodeEnvelope(raw: string): NativeEnvelope {
   const resultValue: Object | undefined = parsed.result;
   const envelope: NativeEnvelope = {
     success: parsed.success === true,
-    result: (resultValue === undefined || resultValue === null) ? emptyResult() : resultValue,
+    result: asFields(resultValue),
     error: typeof parsed.error === 'string' ? parsed.error as string : ''
   };
   return envelope;
@@ -196,7 +212,7 @@ class MockBridgeImpl implements IBridge {
     await delay(MOCK_LATENCY_MS);
     Logger.debug(TAG, 'mock invoke ' + service);
     if (service === BridgeService.VERSION) {
-      const result: Record<string, string> = { version: this.coreVersion };
+      const result: Record<string, string> = { 'version': this.coreVersion };
       return success(result);
     }
     if (service === BridgeService.START_CORE) {
@@ -233,7 +249,7 @@ class MockBridgeImpl implements IBridge {
       return success(result);
     }
     if (service === BridgeService.TEST_SPEED) {
-      const result: Record<string, number> = { speedBps: 0 };
+      const result: Record<string, number> = { 'speedBps': 0 };
       return success(result);
     }
     if (service === BridgeService.GENERATE_CONFIG) {
@@ -244,11 +260,11 @@ class MockBridgeImpl implements IBridge {
       return success(result);
     }
     if (service === BridgeService.RUNTIME_INFO) {
-      const result: Record<string, number> = { socksPort: 10808, httpPort: 10809 };
+      const result: Record<string, number> = { 'socksPort': 10808, 'httpPort': 10809 };
       return success(result);
     }
     if (service === BridgeService.VALIDATE_NODE) {
-      const result: Record<string, boolean> = { valid: true };
+      const result: Record<string, boolean> = { 'valid': true };
       return success(result);
     }
     return failure('unknown-service: ' + service);

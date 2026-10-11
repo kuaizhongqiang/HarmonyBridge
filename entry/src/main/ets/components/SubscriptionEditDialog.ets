@@ -26,13 +26,14 @@ export struct SubscriptionEditDialog {
 
   @State name: string = '';
   @State url: string = '';
-  @State enabled: boolean = true;
+  /** 注意：不能叫 enabled —— CustomComponent 基类已保留该属性名 */
+  @State isEnabled: boolean = true;
   @State autoUpdate: boolean = false;
 
   aboutToAppear(): void {
     this.name = this.initialName;
     this.url = this.initialUrl;
-    this.enabled = this.initialEnabled;
+    this.isEnabled = this.initialEnabled;
     this.autoUpdate = this.initialAutoUpdate;
   }
 
@@ -79,10 +80,10 @@ export struct SubscriptionEditDialog {
           .fontSize(FontSizes.body)
           .fontColor(Theme.textPrimary)
           .layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.enabled })
+        Toggle({ type: ToggleType.Switch, isOn: this.isEnabled })
           .selectedColor(Theme.brand)
           .onChange((isOn: boolean) => {
-            this.enabled = isOn;
+            this.isEnabled = isOn;
           })
       }
       .width('100%')
@@ -118,7 +119,7 @@ export struct SubscriptionEditDialog {
           .layoutWeight(1)
           .enabled(this.name.trim().length > 0 && this.url.trim().length > 0)
           .onClick(() => {
-            this.onConfirm(this.name.trim(), this.url.trim(), this.enabled, this.autoUpdate);
+            this.onConfirm(this.name.trim(), this.url.trim(), this.isEnabled, this.autoUpdate);
             this.controller?.close();
           })
       }

@@ -5,7 +5,7 @@
  */
 import { Subscription, isNeverUpdated } from '../model/Subscription';
 import { SubscriptionId, Timestamp } from '../model/Types';
-import { subscriptionViewModel } from '../viewmodel/SubscriptionViewModel';
+import { subscriptionViewModel, SubscriptionViewModel } from '../viewmodel/SubscriptionViewModel';
 import { SettingsViewModel, settingsViewModel } from '../viewmodel/SettingsViewModel';
 import { Dimens, FontSizes, Radii } from '../constants/Dimens';
 import { Theme } from '../constants/Theme';
