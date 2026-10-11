@@ -49,6 +49,12 @@
 # tracks build outputs (AGENT.md section 1: "不提交任何构建产物").
 /release-out/
 
+# Hand-off directory for cross-compiled native libraries (see
+# docs/04-Linux构建任务书.md). scripts/verify-repo.ps1 already rejects *.so on
+# content, so this is belt-and-braces: it keeps a careless `git add -A` from
+# staging a ~33 MB artifact into the index where it would have to be undone.
+/harmonybridge-so/
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db

@@ -29,7 +29,69 @@
 
 ---
 
-## 1. 挡住「绕过大陆」的硬阻塞
+## 0.1 ✅ Linux 构建已交付（2026-10-11 21:19）—— 两个 `.so` 都拿到了
+
+**交付位置**：`harmonybridge-so/`（仓库根下，**未入库**）。这是本项目**第一次**
+同时拿到可用的内核与数据面。
+
+**Lead 已独立复验**（用 NDK 的 `llvm-readelf` / `llvm-nm`，不是采信交付说明）：
+
+| 检查项 | `libcore.so` (T1) | `libhevsocks5tun.so` (T2) |
+| --- | --- | --- |
+| ELF 头 | ✅ ELF64 / AArch64 / **DYN** | ✅ ELF64 / AArch64 / **DYN** |
+| 大小 | 34,527,768 B（33 MB） | 286,736 B |
+| 导出符号 | ✅ `GoInvoke` / `GoFreeCString`（都是 `T`） | ✅ **3 个 dlsym 目标全在**：`hev_socks5_tunnel_main_from_str` / `_quit` / `_stats` |
+| **TLS 形态** | ✅ TLS 段存在；重定位是 **`R_AARCH64_TLSDESC`** | — |
+| `DT_NEEDED` | `libohcommonevent.so` / `libhilog_ndk.z.so` / `libtime_service_ndk.so` / `libc.so` | **只有 `libc.so`** |
+| SHA-256 | ✅ 与 `SHA256SUMS.txt` 记录**一致** | ✅ **一致** |
+| 内容真实性 | ✅ `.gopclntab` 11.9 MB、`.text` 12.6 MB；含 `Xray` / `xray-core` / `VLESS` / `VMess` / `shadowsocks` / `trojan` / `go1.26` 特征串 | — |
+
+**`R_AARCH64_TLSDESC` 是这次最关键的读数**：它说明产物落在**广义动态 TLS** 上，
+**没有**落进 `docs/design/core.md` §6.3 记录的"bionic 固定槽 + 外来线程调 cgo
+概率性 SIGSEGV"那条路。交付用的正是 §6.3 的 **B 路线（fork + `GOOS=openharmony`）**。
+
+### 0.1.1 ❌ 交付**不完整**（缺件，需补齐）
+
+`harmonybridge-so/SHA256SUMS.txt` 与 `README.txt` 引用了 **7 个文件**，实际只有 **2 个**：
+
+| 缺失 | 影响 |
+| --- | --- |
+| `05-Linux构建执行报告-20261011.md` | ❌ **README 明确指向它，但不存在** —— 任务书 §9 要求的那份报告是核心交付物 |
+| `libcore-A-route.so` | ❌ 无法独立复验"A 路线产物**没有 TLS 段**"这个关键对照结论 |
+| `libhevsocks5tun-3sibling-variant.so` + `siblings-3sibling-variant/` 三个 `.so` | ❌ 备选数据面方案缺件 |
+
+> ⚠️ 已验收的 2 个文件本身是**好的**；缺的是**对照产物与报告**。
+> 因此"A 路线无 TLS 段"这条**目前只有交付方的一面之词**（❓ 未独立证实）。
+
+### 0.1.2 ⚠️ 仍然**没有真机验证**（这一条没有因为拿到 `.so` 而改变）
+
+交付方自己在 README 里写明：两个 `.so` **只做了静态验收**，
+**没有在真机上跑过**。所以以下依然是 ❓：
+
+- 在真机上 `dlopen` 是否成功、`GoInvoke` 是否可调；
+- **外来线程（VPN 扩展进程）调 cgo 是否真的不 SIGSEGV** ——
+  `tlsModel = "GD"` 是**工具链层面**的证据，**不是运行期证据**；
+- hev 能否处理 OHOS 的 vNIC fd（U3，见 §6.1）。
+
+### 0.1.3 ⚠️ 怎么把它们放进 HAP —— **尚未接线**
+
+`entry/libs/arm64-v8a/` 现在**只有 `.gitkeep`**。要让它进 HAP，需要：
+
+```powershell
+copy harmonybridge-so\libcore.so         entry\libs\arm64-v8a\
+copy harmonybridge-so\libhevsocks5tun.so entry\libs\arm64-v8a\
+```
+
+- ✅ `entry/libs/**/*.so` 已被 `.gitignore` 挡住（**产物不入库**，正确）；
+  但根下的 `harmonybridge-so/` **不在** ignore 规则内 —— 它只靠 `verify-repo.ps1`
+  的 `*.so` 规则兜住，**不要 `git add` 它**。
+- ⚠️ **发布流水线的 HAP 里不会有这两个 `.so`**：CI 从 git 检出后构建，而这俩不入库。
+  这是"预编译产物怎么交给 CI"的**待决策项**（对象存储 / Release 资产回填 /
+  runner 上预置），不是执行者该默默决定的事。
+- ⚠️ 3sibling 变体若要用，必须**连三个 sibling 一起**放进 HAP，否则真机 `dlopen` 会失败。
+
+---
+
 
 ### 1.1 ❌ B2：Go → OHOS 工具链 —— 内核 `libcore.so` 编不出来
 
