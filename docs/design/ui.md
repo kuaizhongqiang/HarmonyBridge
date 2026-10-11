@@ -397,3 +397,69 @@ export const CoreAvailable: () => string;
 
 **两侧均未在真机上运行过**，上述全部只是"能编译 + 内核 loader 接受这份配置"，
 没有任何一条跑过真实流量；下载分流资源这一步同样**未在真机验证**。
+
+### 5.7 ArkTS 侧契约对齐与两处真 bug 修复（2026-10-11，🧪 已真编译验证）
+
+**(a) `core/Bridge.ets` 的 static import 位置修正（编译阻塞项）。**
+`import bridgeNative from 'libbridge.so';` 原先在文件第 57 行（`const TAG` 之后），违反
+`arkts-no-misplaced-imports`，`CompileArkTS` 直接失败；已上移到文件顶部 import 区
+（解释性注释随之迁移，未丢失）。`clean` 后全量 `assembleHap`：`CompileArkTS`
+**实际执行** 6s 60ms（非 `UP-TO-DATE`）→ `BUILD SUCCESSFUL`，
+`33 tasks in total: 33 executed, 0 up-to-date`，产出 2535152 字节未签名 HAP。
+
+**(b) `startCore` 的成功判定（真 bug）。**
+旧代码用 `started.pid <= 0` 判失败，而 `pid` 按契约恒为 0（内核跑在 VPN 扩展进程内，
+不是独立进程），于是**原生启动成功也必然被 UI 判成失败**。现在 `StartCoreResult` 新增
+`ok: boolean`（= 信封 `success` **且** 原生 `started === true`）与 `error: string`；
+`pid` 保留但**恒为 0、不再从原生结果读取**（契约的 Start 结果里没有 `pid` 字段）。
+选布尔字段而不是"失败时抛异常"的理由：Bridge 层的约定是"永不抛异常、失败编码进
+返回值"（契约 §3.3），`Bridge.invoke` 的 catch 留给真异常；把业务失败也做成异常，
+调用方就无法区分"内核没启动"与"桥断了"。`ConnectionViewModel.connect()` 改为只看
+`ok`，失败时 `lastError = 'start-core-failed: <原生 error>'`（无 error 时
+`start-core-failed`）。
+
+**(c) 入站端口只保留一个来源（真 bug）。**
+`wired` 按契约 §4.1 表示"本地 SOCKS/HTTP 入站是否真的在监听"，本阶段恒 false；`ConnectionViewModel`
+用 `@Trace coreWired` 如实暴露并逐条打印原生 `notes`，不把"内核已启动"说成"已连通"
+（给 wired=false 加独立界面提示需要新增 string 资源，本轮未做，界面侧仍由 MOCK 横幅承担）。
+端口链：`ConfigService.Generate` 的**结果**回显 Go 侧 `DefaultSocksPort` / `DefaultHTTPPort`
+→ `ConnectionViewModel` 取出 → 同时给 `CoreService.Start`（`socksPort` / `httpPort` 参数，
+契约 §5.1）与 VPN 扩展（新增 want key `SOCKS_PORT` / `HTTP_PORT`，因为扩展是**另一个进程**，
+拿不到 UI 的 `ConfigPathResult`）→ `buildTun2socksYaml(socksPort)`。原生没给端口时回落
+`constants/Common.ets` 的 `CORE_SOCKS_PORT`（10808）/ `CORE_HTTP_PORT`（10809），
+**绝不把 0 传下去**；`VpnAbility.ets` 里那份 `const SOCKS_PORT = 10808` 与
+`NodeViewModel` 演示节点里的 `10808` 字面量都已改为引用该常量。
+
+⚠️ 与本节早先设想不同的一点：`ConfigService.Generate` 的**参数**里**没有**
+`socksPort` / `httpPort`（契约 §4 的参数表就是 `nodeId/routingMode/extra/assetDir/bypassChina`，
+Go 的 `GenerateRequest` 也没有这两个字段，端口由 `config.DefaultSocksPort` 决定并回显），
+所以 ArkTS **不往 Generate 传端口**：传了会被 `encoding/json` 静默忽略，制造"ArkTS 能
+覆盖端口"的假象，比重复字面量更危险。权威端口只有 Go 一份，ArkTS 的常量只是回落值。
+
+**(d) `MOCK_BRIDGE` 保持 `true`，理由更新。**
+契约 §5 的四项**已由 Go 侧实现**（`CoreService.Start` 的 `socksPort` / `httpPort`、
+`CoreService.RuntimeInfo`、`PingService.SpeedTest`、`PingService.Tcping` 的
+`delayMs`→`latencyMs`），所以"原生尚未实现"**不再是**保持 MOCK 的理由。新的真实理由：
+没有鸿蒙真机、`libcore.so` 尚未产出、真实链路无法验证；而且 `NativeBridgeImpl`
+**仍然**返回 `failure('native-bridge-not-linked')`，把开关改成 false 只会让 UI 的每次
+调用都失败，而不是"更真实"。
+字段核对：整个 `entry/src/main/ets` 已**无任何代码读 `delayMs`**（只有
+`Bridge.testLatency` 读 `latencyMs`，与 Go 侧 `service/ping/ping.go:61` 的
+`json:"latencyMs"` 一致，也与契约 §5.3 一致）。
+
+**(e) 防环回路接上 `blockedApplications`（真 bug：此前根本没接）。**
+`vpnability/VpnAbility.ets#buildVpnConfig()` 原先**既没有** `trustedApplications`
+**也没有** `blockedApplications` —— 即冻结裁决（契约 §2 / AGENT.md §2.4）指定的防环
+机制从未接线，真机症状会是"连上即断网"。现在设置
+`blockedApplications: [APP_BUNDLE_NAME]`。
+SDK 取证（`D:\Harmony\DevEco Studio\sdk\default\openharmony\ets\api\@ohos.net.vpnExtension.d.ts`）：
+`VpnConfig` 定义在 :283；`blockedApplications?: Array<string>` 在 :388，语义为
+"**只有不在列表里的应用**才按 routes 被 VPN 代理"（:378-381，即列表 = 被排除/直连的
+应用），取值是 **bundleName 字符串数组**（不是 `ApplicationInfo[]`）；:371 与 :383
+两处都写明它与 `trustedApplications` **互斥**，因此只设这一个字段。
+⚠️ 真机上"自身包名在 `blockedApplications` 里确实止住环路"未经实测。
+
+> 本节 §5.2 的服务名 / 参数表（`version`、`startCore {configPath, assetPath}` 等）是
+> **契约冻结前**的旧写法，与 `core/Bridge.ets`（`Group.Method` 名 +
+> `configLocation` / `assetLocation`）以及契约 §1 / §4 不一致；本轮未改那张表
+> （不属于本轮写入范围），留待文档工作流更正。

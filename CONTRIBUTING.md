@@ -69,14 +69,14 @@ cd Bridge
 
 | 分支 | 用途 |
 | --- | --- |
-| `master` | 主分支，始终保持可构建；只接受 PR 合入 |
+| `main` | 主分支，始终保持可构建；只接受 PR 合入 |
 | `feat/<主题>` | 新功能 |
 | `fix/<主题>` | 缺陷修复 |
 | `docs/<主题>` / `chore/<主题>` | 文档、工程杂项 |
 
 - 一个 PR 只做一件事。跨工作流的大改请拆开，或先在 issue 里说明。
 - **不要**在 PR 里顺手改别的模块的代码；`entry/**`、`AppScope/**` 由对应工作流负责。
-- 禁止 `git push --force` 到 `master`。
+- 禁止 `git push --force` 到 `main`。
 
 ### 2.2 提交信息（Conventional Commits，由钩子强制）
 
@@ -144,7 +144,7 @@ node scripts\validate-json5.mjs # 配置文件语法 + 跨文件一致性
 ## 4. PR 流程
 
 1. **开 issue 或确认已有 issue**（小的文档/笔误可跳过）。
-2. 从最新 `master` 切分支：`git switch -c feat/ui-server-sort`。
+2. 从最新 `main` 切分支：`git switch -c feat/ui-server-sort`。
 3. 提交前跑完第 3 节的门禁。
 4. 推送并开 PR，按 `.github/PULL_REQUEST_TEMPLATE.md` 填写：
    变更类型 / 关联 issue / 变更说明 / **验证方式** / 影响面与回归风险 / 截图（UI 改动）。
@@ -173,7 +173,7 @@ node scripts\validate-json5.mjs # 配置文件语法 + 跨文件一致性
 - ❌ 不提交签名材料、证书、私钥、`local.properties`
 - ❌ 不为了让 CI 变绿而放宽 `.github/**`、`.githooks/**`、`scripts/verify-repo.*` 里的检查
       （这类改动需要单独评审并在描述里说明理由）
-- ❌ 不直接 `git push` 到 `master`
+- ❌ 不直接 `git push` 到 `main`
 - ❌ 不修改 `third_party/v2rayN` 的内容
 
 ---

@@ -83,15 +83,15 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
 | 服务名 | 参数 | 结果 | 实现 |
 |---|---|---|---|
 | `VersionService.GetVersion` | `{}` | `{version, semver, bridge, go}` | ✅ 原生已实现 |
-| `CoreService.Start` | `{configLocation, assetLocation, start?}` | `{started, configLoaded, configBytes, wired, socksPort, httpPort, version, notes[]}` | ⚠️ 原生为 fd 模型，待收敛（§5） |
+| `CoreService.Start` | `{configLocation, assetLocation, start?, fd?（reserved，不读）, socksPort?, httpPort?}` | `{started, configLoaded, configBytes, wired, socksPort, httpPort, version, notes[]}` | ✅ 已收敛（静态核对）：`fd` 降为 reserved 且不再读取（`golang/service/core/core.go:71-76`）；`socksPort`/`httpPort` 在入参与结果中（同文件 `:87-91`、`:117-121`） |
 | `CoreService.Stop` | `{}` | `{stopped}` | ✅ |
-| `CoreService.Status` | `{}` | `{running, version, lastError?}` | ✅（`fd` 字段随 §5 移除） |
-| `CoreService.RuntimeInfo` | `{}` | `{socksPort, httpPort, logPath?}` | ❌ 待实现 |
+| `CoreService.Status` | `{}` | `{running, version, lastError?}` | ✅（`fd` 字段已移除，见 `golang/service/core/core.go:132`） |
+| `CoreService.RuntimeInfo` | `{}` | `{socksPort, httpPort, configLocation?, note?}` | ✅ 已实现并注册（`golang/service/core/core.go:154-170`、`:354-387`，注册于 `:425`）。**本行已按实现修正**：原写的 `logPath` 没有数据源，改回 `configLocation`（它确实是"最近一次 Start 读取的配置文件"） |
 | `ConfigService.Generate` | `{nodeId, routingMode, extra, assetDir, bypassChina?}` | `{configJson, socksPort, httpPort, outboundTag, protocol, transport, security, geoAssets, notes[]}` | ✅ 已实现（`golang/service/config`） |
 | `LogService.Tail` | `{limit}` | `{lines[], count}` | ✅ |
 | `LogService.Clear` | `{}` | `{cleared}` | ✅ |
-| `PingService.Tcping` | `{host, port, timeoutMs?}` | `{latencyMs, reachable, address, ip?, resolveMs?, error?}` | ⚠️ 字段名为 `delayMs`，待改名 |
-| `PingService.SpeedTest` | `{}` | `{speedBps}` | ❌ 待实现（**不得伪造测量值**） |
+| `PingService.Tcping` | `{host, port, timeoutMs?}` | `{latencyMs, reachable, address, ip?, resolveMs?, error?}` | ✅ 已改名 `latencyMs`（`golang/service/ping/ping.go:57-61`） |
+| `PingService.SpeedTest` | `{}` | `{speedBps, notes[]}` | ✅ 已实现为**符合 §4.1 的占位**：`speedBps` 恒 0 + `notes` 说明，不伪造数值（`golang/service/ping/ping.go:167-194`，注册于 `:216`）；真机测速仍未实现 |
 | `ValidatorService.ValidateConfig` | `{config?, configLocation?, configPath?}` | `{valid, errors[], inboundTags[], outboundTags[]}` | ✅ |
 
 ### 4.1 关键语义
@@ -104,18 +104,35 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
 
 ---
 
-## 5. 原生侧待收敛清单（明确欠债，不是"已完成"）
+## 5. 原生侧待收敛清单（2026-10-11 复核：第 1–7 项已全部落地）
 
-`entry/src/main/golang/` 当前仍是 **fd 直通模型**。需按下列改动收敛到本契约：
+`entry/src/main/golang/` **已不再持有 tun fd**（`fd` 降为 reserved，数据面走 tun2socks）。
+逐项落地状态如下（2026-10-11 复核）：
 
-1. `CoreService.Start`：把 `fd` 从**必填改为可选**（保留字段以备将来，注释标明当前未使用），
-   新增结果字段 `socksPort` / `httpPort`；`wired` 语义改为"本地入站已监听"。
-2. `registry/registry.go`：不再准备 `proxy/tun`，改为空白导入 **`proxy/socks` 与 `proxy/http`**，
-   使本地入站真实存在。
-3. `PingService.Tcping`：结果字段 `delayMs` → `latencyMs`（保留 `reachable`）。
-4. 新增 `CoreService.RuntimeInfo`、`ConfigService.Generate`、`PingService.SpeedTest`。
-5. `main_test.go` 的 `expectedRoutes` 同步更新，并**保持"漂移即失败"的严格性**。
-6. `CoreService.Status` 移除 `fd` 字段（或标注为 reserved）。
+> **证据分级（沿用 `AGENT.md` 第 8 节）**：
+> - 🧪 **本机已跑过（不是静态核对）**：`gofmt -l` 空、`go build ./...`、`go vet ./...`、
+>   `go test ./... -count=1` 全绿。本机没有 C 编译器，所以这条是 **`CGO_ENABLED=0`** 路径。
+> - ⚠️ **`main_test.go`（`//go:build cgo`）在本机编不了**：本机没有 gcc/clang，cgo 包被构建约束整体排除。
+>   它现在由 CI 的 `CGO_ENABLED=1` 步骤覆盖（该步先断言 `main.go`/`main_test.go` **确实在编译集里**，
+>   再跑 `go test .`），因为在 `CGO_ENABLED=0` 下这个包的编译错误是**隐形**的 —— 历史上就有一个
+>   `main.go` 的编译错误这样混进了 `main`（见 `TODO.md` §2.6）。
+> - ❓ **真机未验证**：`wired` 仍恒为 false，没有任何进程真的在监听。
+
+1. ✅ **已落地** `CoreService.Start`：`fd` 已从必填改为可选并标注 reserved、当前不读取
+   （`golang/service/core/core.go:70-76`），新增结果字段 `socksPort` / `httpPort`
+   （同文件 `:87-91`、`:117-121`）；`wired` 语义见 §4.1（当前恒为 false，因为还没有进程真的监听）。
+2. ✅ **已落地** `registry/registry.go`：已空白导入 `proxy/socks` 与 `proxy/http`
+   （`:45`、`:48`）；`proxy/tun` 的真相与"缺的不是 import"见该文件 `:71-89` 的注释。
+3. ✅ **已落地** `PingService.Tcping`：结果字段已是 `latencyMs`（保留 `reachable`），
+   见 `golang/service/ping/ping.go:57-61`。
+4. ✅ **已落地** 三条路由：`CoreService.RuntimeInfo`（`service/core/core.go:354-387`，
+   注册于 `:425-431`）、`ConfigService.Generate`（`service/config/config.go:161`）、
+   `PingService.SpeedTest`（`service/ping/ping.go:179-194`，注册于 `:216-220`）。
+5. ✅ **已落地**：`main_test.go:29-41` 的 `expectedRoutes` 与 `service/core/core_test.go:36-48`
+   的 `contractRoutes` 都已是 **11 条**，与代码实际注册的 11 条路由逐字对应（含
+   `ConfigService.Generate`、`CoreService.RuntimeInfo`、`PingService.SpeedTest`），
+   并各有一条"排序/漂移即失败"的断言（`main_test.go:43`、`core_test.go:53`）。
+6. ✅ **已落地** `CoreService.Status` 已移除 `fd` 字段，见 `service/core/core.go:130-138`。
 7. ~~**`ConfigService.Generate` 的 `extra` 语义待确认**~~ **已确认并实现**：
    `extra` = 节点完整字段的 JSON（`model/ServerNode.ets` 的 `NodeJson` / `nodeToJsonText`），
    `nodeId` 仅用于日志与回显 —— Go 侧没有也不应该有节点表。实现见
@@ -141,8 +158,10 @@ export const CoreAvailable: () => string;   // diag: '' | 'unknown' | 绝对路�
    （`allowInsecure` 本身**保留**在字段清单里，但只做导入兼容、生成时绝不写入）。
    见 [`ui.md`](ui.md) §5.6 与 [`core.md`](core.md) §7.4.5.1。
 
-> 在这些改动完成之前，UI 必须保持 `MOCK_BRIDGE = true`。
-> 这不是"临时妥协"，而是**正确的当前状态**：契约已冻结，实现尚未跟上，且这一点被明确记录。
+> `MOCK_BRIDGE` **仍必须保持 `true`**，但理由已经变了（2026-10-11 复核）：不再是"原生侧
+> 没实现"，而是**没有真机、`libcore.so` 尚未产出、真实链路无法验证** —— 见
+> `entry/src/main/ets/core/Bridge.ets` 里 `MOCK_BRIDGE` 的注释。这仍是**正确的当前状态**，
+> 且被明确记录。
 
 ---
 

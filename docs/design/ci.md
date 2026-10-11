@@ -40,14 +40,22 @@
 | --- | --- | --- | --- |
 | L0 编辑器 | 保存时 | `.editorconfig`、DevEco Code Linter | 最便宜的反馈 |
 | L1 本机提交前 | `git commit` | `.githooks/pre-commit`（只查**暂存区**）、`.githooks/commit-msg` | 拦住"差点提交进去"的产物与不规范信息 |
-| L2 本机完整 | 手动 / 推之前 | `scripts/check-env.ps1`、`scripts/verify-repo.ps1`（全量索引）、`node scripts/validate-json5.mjs` | 与 CI 同一套规则，提前发现问题 |
-| L3 PR / push | `.github/workflows/ci.yml` | `repo-hygiene`(windows) + `conventional-pr`(ubuntu，仅 PR) + `manifests`(ubuntu) | 不可绕过的自动化门禁 |
-| L4 标签发布 | `.github/workflows/release.yml` | 版本号校验 + 干跑（`workflow_dispatch`）；真正的构建/签名**尚未实现** | 发布流程的骨架与显式失败 |
-| L5 自托管 | `[self-hosted, harmonyos, windows]` | DevEco 构建、`hap-sign-tool.jar` 签名、真机 instrumentation | **待搭建**，见第 4 节 |
+| L2 本机完整 | 手动 / 推之前 | `scripts/check-env.ps1`、`scripts/verify-repo.ps1`（全量索引）、`node scripts/validate-json5.mjs`、`scripts/release-preflight.ps1` | 与 CI 同一套规则，提前发现问题 |
+| L3 PR / push | `.github/workflows/ci.yml` → `verify.yml` | `repo-hygiene`(windows) + `manifests`(ubuntu) + `go`(ubuntu) + `conventional-pr`(ubuntu，仅 PR) | 不可绕过的自动化门禁 |
+| L4 标签发布 | `.github/workflows/release.yml` | `verify`（复用 L3 的门禁）+ 版本号校验 + 生成变更日志 + **自托管构建/发布** | 一条命令出 Release |
+| L5 自托管 | `[self-hosted, harmonyos, windows]` | DevEco `assembleHap` → `SHA256SUMS.txt` → `gh release create` | **待注册 runner**，见第 4 节 |
 
-**为什么"检查"和"构建"要分开？** 因为它们的**可运行前提完全不同**。L3 的三项只需要
-`git` / `node` / `pwsh`，任何托管 runner 都有；而真正的 HAP 构建需要几个 GB 的 SDK 和
-许可受限的签名材料。把两者塞进同一个 job 的后果是：要么整个 CI 因为没有 SDK 而常年红着，
+### 2.1 为什么门禁放在**可复用 workflow** 里
+
+`repo-hygiene` / `manifests` / `go` 三项定义在 **`.github/workflows/verify.yml`**
+（`on: workflow_call`），由 `ci.yml` 与 `release.yml` 共同调用。
+
+理由很直接：**tag 不应该买到一条 push 买不到的门禁**。如果 `release.yml` 把这三步各抄一遍，
+两份就会漂移 —— 于是"PR 会被拦下的东西"可以从 Release 溜出去。现在只有一份定义。
+
+**为什么"检查"和"构建"要分开？** 因为它们的**可运行前提完全不同**。L3 只需要
+`git` / `node` / `pwsh` / Go（hosted runner 都有）；而真正的 HAP 构建需要几个 GB 的
+SDK 和一个 DevEco 安装。把两者塞进同一个 job 的后果是：要么整个 CI 因为没有 SDK 而常年红着，
 要么为了让它绿而把构建步骤删掉——两种结果都比"明说做不了"更糟。
 
 ---
@@ -106,7 +114,70 @@ build|ci|chore|revert`），并开启 `validateSingleCommit`——因为仓库�
 也就是给一个目前还没有 Node 依赖的仓库引入供应链面。手写解析器的代价是"不是规范完备"，
 这一点是**已知缺口**，见第 6 节。
 
-### 3.4 `build-hap`：**刻意不可运行**
+### 3.4 `go`（`ubuntu-latest`）—— 两种配置，缺一不可
+
+这是**最容易做错、也最值得讲清**的一项。Go 侧的构建有两条互不覆盖的路径：
+
+| 配置 | 编到什么 | 覆盖了什么 | 漏掉了什么 |
+| --- | --- | --- | --- |
+| `CGO_ENABLED=0` | 纯 Go 半边 | 服务层（`ipc`/`service/*`）能编、能测 | **`main.go` / `main_test.go` 整体被构建约束排除** |
+| `CGO_ENABLED=1` | 含 cgo 半边 | `main.go` 会被真正类型检查；`main_test.go` 会真正运行 | 仍需 OHOS NDK 才能交叉编 `libcore.so` |
+
+**为什么必须两个都跑**：`main.go` 与 `main_test.go` 都带 `//go:build cgo`。
+在 `CGO_ENABLED=0` 下它们**根本不在编译集里**，所以那里的编译错误是**完全隐形**的。
+
+> 🧪 **这不是假想**：仓库里真的有一个 `main.go` 的编译错误
+> （`params := "{}"` 被粘进了上一行的注释里）这样混进了 `main`，
+> 于是**服务目录黄金列表的唯一守卫 `main_test.go` 从来没跑过**，
+> 一个"漏了一项"的错误因此长期存在。见 `TODO.md` §4.1。
+
+因此 `CGO_ENABLED=1` 的步骤里有一条**额外的守卫**：
+
+```bash
+go list -f '  CgoFiles={{.CgoFiles}} TestGoFiles={{.TestGoFiles}}' .
+go test . -run '^$' -count=1     # 编译测试二进制、不跑用例并
+```
+
+`go test -run '^$'` 是这个守卫的实质：它**编译** `main.go` 与 `main_test.go`，
+因此 `main.go` 编不过会立刻红。没有它，一旦 runner 上没有 `cc`，cgo 会被静默关掉，
+而后续 `go build ./...` / `go test ./...` 会**"假装通过"** —— 那正是原缺陷得以发生的原因。
+另有一条 `go env CGO_ENABLED` 断言与一条 `cc --version`，让"cgo 到底有没有生效"成为**显式事实**。
+
+> 🧪 **这条守卫自己也是要验证的代码，而且第一版是坏的**（写它时本机还跑不了 Go）：
+> 1. 最初写成 `go list -f '{{join .GoFiles "\n"}}'` —— Go 的 `text/template`
+>    **不支持字符串里的 `\n` 转义**，这条命令直接报
+>    `template: main:1: unexpected "\\" in operand`，**守卫会在第一次运行就炸**；
+> 2. 而且 `.GoFiles` 对这个包**是空的**：带 `//go:build cgo` 的文件归 `.CgoFiles`，
+>    `_test.go` 归 `.TestGoFiles`。任何只看 `.GoFiles` 的守卫都会永远失败。
+>
+> 两个坑都是**真的跑了一遍**才发现的。教训记在 `TODO.md` §4.3。
+
+`release.yml` 调用 `verify.yml` 时传 `cgo: false`（见第 5 节）：cgo 只在**分支 CI**上
+是硬门禁；一条 tag 是否发布，由仓库卫生、配置合法性与版本一致性决定。
+**这不代表 cgo 失败可以接受** —— 它代表"main 必须绿"是 push 的责任，不是发布的责任。
+
+### 3.4.1 本机也能跑 cgo（2026-10-11 补）
+
+本机 `C:\msys64\mingw64\bin` 有 MinGW gcc 16.1.0。设好之后
+`CGO_ENABLED=1 go test ./... -count=1` **在本机全绿**，`main_test.go` 12/12 PASS ——
+这是它历史上第一次被执行。所以"cgo 只能靠 CI 验证"这句话**在本机是不成立的**：
+
+```powershell
+$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+$env:CGO_ENABLED = '1'
+$env:CC = 'C:\msys64\mingw64\bin\gcc.exe'
+cd entry\src\main\golang
+go test ./... -count=1
+```
+
+⚠️ **注意陷阱**：不把 `C:\msys64\mingw64\bin` 放进 `PATH` 时，直接调用那个 `gcc.exe`
+会**静默失败**（无输出、exit 1），很容易被误判成"这台机器没有 C 编译器"。
+首次探测时正是这样错过它的。
+
+⚠️ 本机 `bash` 是 **WSL 的桩**（`C:\Windows\system32\bash.exe`），不是 Git for Windows 的 bash。
+所以 `shell: bash` 的步骤与 `scripts/*.sh` **在本机无法复现**，只能靠等价逻辑核对。
+
+### 3.5 `build-hap`：**刻意不可运行**
 
 ```yaml
 if: false
@@ -120,7 +191,9 @@ runs-on: [self-hosted, harmonyos, windows]
   而不是"悄悄成功"。
 - job 内的第一步是一条 `exit 1`，输出明确的 `::error::`：**这是有意为之**——
   宁可红得震耳欲聋，也不要绿得毫无意义。
-- 每个待实现步骤都带 `# TODO(setup):`，并写清预期命令与产物路径。
+- **HAP 构建已经不在这个 job 里了**：它搬到了 `release.yml` 的 `publish` job。
+  这里保持禁用，是因为"每次 push 都编 HAP"不是本项目的需要，而"打 tag 出包"是。
+  本 job 保留为**手动入口的骨架**（放开 `if` 即可复用，命令见同文件注释）。
 
 ---
 
@@ -141,7 +214,11 @@ runs-on: [self-hosted, harmonyos, windows]
 | Go | 用于编译 `libcore.so`（`GOOS=linux` + `-D__MUSL__`，见 `docs/design/core.md` 6.1/6.2） | **目前没有 `GOOS=ohos`** |
 | `git-lfs` | `*.so` / `*.p12` 等 LFS 过滤器 | 本仓库不存 LFS 对象，但 `git lfs install` 仍需 |
 
-### 4.2 签名材料（**绝不入库**）
+### 4.2 签名材料（**本流水线不需要，且绝不入库**）
+
+⚠️ **本项目当前的发布策略是"未签名 HAP + 自行签名指引"**（决策理由见第 5 节），
+所以**注册 runner 时不需要准备下面任何东西**。本节保留，是为了将来若要改成
+"流水线内签名"时知道需要什么：
 
 | 需求 | 内容 |
 | --- | --- |
@@ -160,50 +237,93 @@ runs-on: [self-hosted, harmonyos, windows]
 ### 4.4 runner 侧的接线方式
 
 1. 在机器上注册 self-hosted runner，**打上 `harmonyos` 与 `windows` 标签**
-   （与 `.github/workflows/ci.yml` / `release.yml` 里的 `runs-on` 对应）。
-2. 设 `DEVECO_HOME`、`SDK_HOME`、`JAVA_HOME` 环境变量。
-3. 把签名材料放进受限目录，用环境变量指向它（例如 `HB_SIGN_KEYSTORE`、
-   `HB_SIGN_PROFILE` —— `release.yml` 的 preflight 已经按这些名字检查）。
-4. 去掉 `.github/workflows/ci.yml` 里 `build-hap` job 的 `if: false`，
-   并把它 steps 里 `# TODO(setup):` 的部分替换为真实命令。
-5. 先在一个分支上验证，再放开到 `master`。
+   （与 `.github/workflows/release.yml` 里的 `runs-on` 对应）。
+   `scripts/release-preflight.ps1` 会逐项检查下面这些条件，缺什么直接说清。
+2. 设 `DEVECO_HOME`（其余 `DEVECO_SDK_HOME` / `JAVA_HOME` 可由它推导，
+   preflight 与 `release-local.ps1` 都会兜底）。
+3. **不需要签名材料**（第 4.2 节）。
+4. **什么都不用改 workflow**：`release.yml` 的 `publish` job 就是完整实现。
+   注册好 runner 之后，`git push` 一个 `v*` tag 即触发。
+5. 先在一个分支/预发布 tag（如 `v0.1.0-rc.1`）上验证，再打正式 tag。
 
-> **不要**把自托管 runner 直接暴露给来自 fork 的 PR：那等于让任意代码在装有签名材料的
-> 机器上执行。本项目用 `pull_request`（不是 `pull_request_target`）+ 托管 runner 跑
-> L3 全部检查，自托管 runner 只承接 `workflow_dispatch` 与 tag 触发的发布 —— 就是为了避开
-> 这个问题。
+**没有 runner 时的替代路径**（本机就是 runner）：
+
+```powershell
+pwsh -File scripts/release-local.ps1 -Tag v0.1.0              # 构建 + 生成产物，不发布
+pwsh -File scripts/release-local.ps1 -Tag v0.1.0 -Publish     # 建 draft Release
+```
+
+它与 CI 路径读**同一份** `scripts/release-metadata.json`，所以产物名与版本规则不会漂移。
+
+> **不要**把自托管 runner 直接暴露给来自 fork 的 PR：那等于让任意代码在那台机器上执行。
+> 本项目用 `pull_request`（不是 `pull_request_target`）+ 托管 runner 跑 L3 全部检查，
+> 自托管 runner **只承接 tag 触发的发布** —— 就是为了避开这个问题。
 
 ---
 
 ## 5. L4：发布流程（`.github/workflows/release.yml`）
 
-### 5.1 已实现
+### 5.1 流程
+
+```
+push tag v*
+  ├─ verify     (托管)  复用 verify.yml 的门禁：仓库卫生 + 配置合法性（cgo 不参与，见 3.4）
+  ├─ changelog  (托管)  tag ↔ AppScope/app.json5 versionName 一致性；生成 RELEASE_NOTES.md
+  └─ publish    (自托管) release-preflight → ohpm install → hvigorw clean + assembleHap
+                        → 改名为 harmonybridge-<version>-unsigned.hap → SHA256SUMS.txt
+                        → gh release create（带 notes 与两个产物）
+```
 
 | 步骤 | 说明 |
 | --- | --- |
-| 触发 | `push` tag `v*`；或 `workflow_dispatch`（带 `dry_run` 输入） |
-| 版本解析 | 从 tag 取 `v<semver>`，与 `AppScope/app.json5` 的 `versionName` **比对**；不一致直接失败并说明"先改清单再打 tag" |
-| 清单复检 | 再跑一次 `scripts/validate-json5.mjs` |
-| 干跑 | `workflow_dispatch` 时跑 `verify-repo.sh`，并把"构建/签名/发布都未执行"写进 job summary |
-| preflight | 真发布路径会检查 DevEco、签名密钥库、profile 是否就绪；缺任何一项 → `::error::` + 非 0 退出 |
-| 权限 | 默认 `contents: read`；只有 `release` job 提权到 `contents: write` |
+| 触发 | `push` tag `v*`；或 `workflow_dispatch`（`dry_run` 默认 true，只校验+生成 notes） |
+| 版本校验 | 唯一实现是 `scripts/changelog.mjs --validate-only`，CI 与本地脚本**共用**它（不再各写一段 node 内联脚本） |
+| 变更日志 | `scripts/changelog.mjs` 读 **commit log**，按 Conventional Commit 类型分组 |
+| preflight | `scripts/release-preflight.ps1 -RequireDeveco`，逐项检查 DevEco / hvigorw / ohpm / SDK / Java / metadata |
+| 构建 | `clean` **之后** `assembleHap`（release 模式）—— 增量任务可能只报 `UP-TO-DATE`，那证明不了任何事 |
+| 产物 | `harmonybridge-<version>-unsigned.hap` + `SHA256SUMS.txt`（`sha256sum -c` 可直接用） |
+| 权限 | 默认 `contents: read`；只有 `publish` job 提权到 `contents: write` |
 
-### 5.2 未实现（带 `# TODO(setup):`，且会显式失败）
+### 5.2 为什么**必须自己**生成变更日志
 
-1. 编译原生内核（`scripts/build-core.ps1`，属原生工作流）
-2. `hvigorw ... assembleHap` 产出**未签名** HAP
-3. `hap-sign-tool.jar sign-app` 签名
-4. 生成 `SHA256SUMS.txt`
-5. 创建 GitHub Release 并附带产物（`softprops/action-gh-release@v3`）
+`.github/release.yml` 配置的是 GitHub 自带的生成器，而它**按 PR 标签分类、且只能列 PR**。
+本仓库是**直接提交到 `main`**、没有一变更一 PR，所以用它会得到一个**几乎空白**的
+变更日志。`scripts/changelog.mjs` 改读 commit log —— 那是这里唯一真实存在的记录。
 
-**为什么让它失败而不是跳过？** 因为"跳过"会让 tag 打完之后看起来发布成功了，
-而 Releases 页面空空如也——这种静默失败比一次明确的红色 job 昂贵得多。
+`.github/release.yml` 仍然保留（手工在 GitHub 上点"Generate release notes"时会用到），
+文件头已注明它**不再是本流水线的产出**。
 
-### 5.3 版本号约定
+### 5.3 为什么产物是**未签名** HAP（决定，不是遗漏）
 
-- tag 形式：`v<major>.<minor>.<patch>`（可带 `-rc.1` 之类的后缀，正则已允许）。
-- **tag 必须与 `AppScope/app.json5` 的 `versionName` 一致**，且 `versionCode` 单调递增。
-- 打 tag 前请在本地跑通 `docs/03-环境搭建.md` 第 5 节的命令行构建。
+三条理由，任何一条都足够：
+
+1. **既定决策**：本项目"仅自用、不对外发行"（`AGENT.md` §7），没有签名分发的需要；
+2. **纪律**：`.p12` / `.cer` / `.p7b` 及口令**不许入库**（`AGENT.md` §1），
+   而把 6 个 secret 接进流水线只为了让自用产物"看起来正式"，收益不抵复杂度；
+3. **诚实**：与其造一个"已签名"的假象，不如发未签名包并**在 release notes 里
+   写清怎么自行签名**。`RELEASE_NOTES.md` 末尾由
+   `scripts/release-notes-footer.md` 追加这段指引（含"自签名后 SHA-256 会变，
+   `SHA256SUMS.txt` 校验的是下载到的**未签名**包本身"这种容易踩的坑）。
+
+`release.yml` 里有一条**反向断言**：如果产出的是已签名 HAP，直接失败 ——
+因为那意味着签名被静默启用、与文档策略不符。
+
+### 5.4 为什么 tag 打完之后**必须**红，而不是"跳过"
+
+`publish` job 跑在不存在的 runner 标签上。没有 runner 时，job 会一直 **pending**
+（`docs/00-技术路线可行性.md` 里的判断：宁可红得震耳欲聋，也不要绿得毫无意义）。
+
+**为什么不让它"优雅跳过"？** 因为跳过会让 tag 打完之后看起来发布成功了，
+而 Releases 页面空空如也 —— 这种**静默失败**比一次明确的红色 job 昂贵得多。
+
+### 5.5 版本号约定
+
+- tag 形式：`v<major>.<minor>.<patch>`，预发布用后缀（如 `v0.1.0-rc.1`，会被自动标 `--prerelease`）。
+- **tag 必须与 `AppScope/app.json5` 的 `versionName` 完全相等**（`changelog.mjs` 会强制检查）。
+- `versionCode` 需单调递增 —— 这条**只有人工保证**，脚本只提醒不强制（见
+  `scripts/release-metadata.json` 的 `versionCodeRule`）。
+- 打 tag 前请在本地跑通 `docs/03-环境搭建.md` 第 5 节的命令行构建，
+  或直接用 `scripts/release-local.ps1` 的干跑。
 
 ---
 
@@ -211,9 +331,12 @@ runs-on: [self-hosted, harmonyos, windows]
 
 | 缺口 | 现状 | 影响 | 何时能补 |
 | --- | --- | --- | --- |
-| **不产出 HAP** | `build-hap` 为 `if: false`；`release` job 的构建/签名步骤是 TODO | CI **不能**替代本机构建；PR 合入前必须有人在 DevEco 里真构建过 | 搭好自托管 runner 后 |
+| **托管 runner 上不产出 HAP** | HAP 只在 `release.yml` 的 `publish`（自托管）里构建；`ci.yml` 的 `build-hap` 仍 `if: false` | `CI` 不能替代分支上的本机构建；PR 合入前必须有人在 DevEco 里真构建过 | 让每次 push 都编 HAP 是**有意的非目标**；若要，放开 `build-hap` 的 `if` |
+| **发布流水线从未在 GitHub 上真实运行过** | 每个零件都已在本机验证（见第 8 节），但"tag → runner → Release"整链未跑 | 首次打 tag 时可能暴露 YAML/runner 配置问题 | 注册 runner 后打一个 `v*-rc.1` |
+| **`libcore.so` 不在任何流水线里** | 交叉编译需要 OHOS NDK，且当前被 `socklen_t` 冲突挡住（`TODO.md` §1.1） | 产出的 HAP **不含可用内核** | 解决 `TODO.md` §1.1 之后 |
 | **不跑 `ohosTest`** | 无设备、无模拟器 | 只能靠本机实测；PR 模板里有"未做实机验证"勾选项要求如实标注 | 有真机或模拟器后 |
 | **静态检查未进 CI** | DevEco Code Linter（`code-linter.json5`）需要在 DevEco 内运行 | ArkTS 规则只能靠本机跑；`repo-hygiene` 查不到 ArkTS 问题 | 找到可在命令行调用 codelinter 的方式后（**待确认**：DevEco 的 codelinter CLI 接口未在本机验证） |
+| **workflow YAML 无自动校验** | `.github/**` 的 YAML 只由 GitHub 自己解析 | 写坏要到 push 之后才暴露 | **本轮是用本机 PyYAML 手验的结构**（`on`/`jobs`/`runs-on`/`needs`/`steps`），未进 CI —— 加它需要引入 YAML 依赖，与本仓库"零 Node 依赖"冲突，**待决策** |
 | **ArkTS 无 CodeQL 支持** | CodeQL 不支持 ArkTS / `.ets` | **本仓库没有配置 `codeql.yml`**，这是有意的决定，不是遗漏 | 见下 |
 | **工作流 YAML 无自动校验** | `.github/**` 的 YAML 目前只由 GitHub 自己解析 | YAML 写坏要到 push 之后才暴露 | 可考虑加一个只读 YAML 解析的 job（**待确认**：是否愿意为此引入 npm 依赖，或接受手写解析器的局限） |
 | **JSON5 解析器非规范完备** | `scripts/validate-json5.mjs` 覆盖注释/尾逗号/单引号/无引号键/`0x`/`+` 号等常用子集 | 极端 JSON5 写法可能被误判 | 需要时换成成熟库（要引入 Node 依赖） |
@@ -263,6 +386,33 @@ ubuntu runner 上完成。在那之前，安全扫描依赖：
 > 集成阶段的实际结论：44 个 `.ets` 文件中**未发现真实语法缺陷**；上述 13 个报错与 4 个配平报错
 > 均已被证明是工具局限导致的假阳性。
 
+### 6.3 ⚠️ 上一节的前提已被推翻：ArkTS 侧其实**能**编译
+
+上面整节讨论的是"如何在**没有 DevEco 的机器上**给 `.ets` 做语法门禁"。
+但本项目**一直**能在本机跑真编译 —— `docs/03-环境搭建.md` §5.2 早就记录了
+`hvigorw assembleHap` 打通（`BUILD SUCCESSFUL`）。
+
+**误导来源**：`TODO.md` 旧 §3.2 写的是"**本机没有 `hvigorw`，整个 HAP 从未构建**"。
+这与 §5.2 的实测记录**直接矛盾**，而它让人以为"编译验证做不到" —— 于是
+**一个会让构建彻底失败的改动**（`Bridge.ets` 里 `import` 位置违规，
+`arkts-no-misplaced-imports`）就这样留在了 `main` 上，没人发现。
+
+**现在的做法**：ArkTS 的正确性用**真编译**验证，不用任何近似手段：
+
+```powershell
+$dev = "D:\Harmony\DevEco Studio"
+$env:DEVECO_SDK_HOME = "$dev\sdk"; $env:JAVA_HOME = "$dev\jbr"
+& "$dev\tools\hvigor\bin\hvigorw.bat" clean --no-daemon
+# 重定向到文件再读；不要用 PowerShell 管道抓 hvigor 输出（会截断 文件:行:列）
+cmd /c "`"$dev\tools\hvigor\bin\hvigorw.bat`" --mode module -p product=default -p buildMode=debug assembleHap --no-daemon > `"$env:TEMP\build.log`" 2>&1"
+```
+
+**`clean` 是必须的**：只看 `UP-TO-DATE` 的构建证明不了任何事（它可能吃增量缓存）。
+
+**它仍然进不了 CI** —— 托管 runner 上没有 DevEco。所以这条门禁的形态是
+"**改完 `.ets` 必须本机 `clean` + `assembleHap` 一次**"（`AGENT.md` §3.1 末尾已写明），
+而不是一个自动化 job。这是**已知缺口**，不是遗漏。
+
 ---
 
 ## 7. 分支 / 标签 / 发布策略
@@ -271,30 +421,39 @@ ubuntu runner 上完成。在那之前，安全扫描依赖：
 
 | 分支 | 说明 |
 | --- | --- |
-| `master` | 主分支，始终可构建；只接受 PR（Squash and merge） |
+| `main` | 主分支（**实测 `origin/HEAD` 就是 `main`**），始终可构建；只接受 PR（Squash and merge） |
 | `feat/*` `fix/*` `docs/*` `chore/*` | 短期分支，用完即删 |
 
-当前**没有** `develop` 分支，也**不需要**：项目处于早期，`master` + tag 足够。
+当前**没有** `develop` 分支，也**不需要**：项目处于早期，`main` + tag 足够。
 将来若需要"预发布通道"，再引入 `release/*` 分支，并同步修改
 `.github/workflows/release.yml` 的 tag 过滤与本文档。
+
+> ⚠️ **2026-10-11 修正**：本文档与 `CONTRIBUTING.md` 此前把主分支写成 `master`，
+> 但仓库实际的是 **`main`**。已全部改正。`ci.yml` 的 `pull_request.branches`
+> 保留 `[main, master]` 两个值 —— 那**不是**笔误，而是让"万一有人把默认分支改名"
+> 时门禁仍然生效（多写一个不存在的分支名没有任何代价）。
 
 ### 7.2 标签
 
 - `v<major>.<minor>.<patch>`：正式版本，触发 `release.yml`。
-- 预发布用 `v1.2.3-rc.1` 形式（正则允许后缀）。
-- **打 tag 前**：`master` 上 CI 全绿 + 本地真机验证过 + `AppScope/app.json5` 版本号已更新。
+- 预发布用 `v1.2.3-rc.1` 形式（正则允许后缀，会自动标成 GitHub prerelease）。
+- **打 tag 前**：`main` 上 CI 全绿 + `AppScope/app.json5` 版本号已更新。
+  真机验证**不再是前置条件**：项目还没有真机，而 tag 的意义是记录里程碑
+  （未签名 HAP + 已知限制写进 release notes，见第 5.3 节）。
 
-### 7.3 发布产物（目标形态）
+### 7.3 发布产物（目标形态 = 已实现形态）
 
-一旦自托管 runner 就绪，一次发布预期产出：
+一次发布产出（未签名，理由见第 5.3 节）：
 
 ```
-harmonybridge-<version>.hap        已签名，可侧载
-SHA256SUMS.txt                     上述文件的 SHA-256
+harmonybridge-<version>-unsigned.hap    未签名；需自行签名后侧载
+SHA256SUMS.txt                          上述文件的 SHA-256（sha256sum -c 可直接用）
+RELEASE_NOTES.md                        由 scripts/changelog.mjs 生成（含"已知限制"小节）
 ```
 
-Release notes 由 `.github/release.yml` 按 **PR 标签**归类（GitHub 的生成器只看标签，
-看不到 commit type，所以 `.github/release.yml` 里的 label 名与 commit type 保持一致）。
+Release notes 由 `scripts/changelog.mjs` 从 **commit log** 生成并按 Conventional Commit
+类型分组。`.github/release.yml`（GitHub 自带的、按 **PR 标签**分类的生成器）仍然保留但
+**不再是本流水线的产出** —— 本仓库直接提交到 `main`，用它只会得到空白日志。见第 5.2 节。
 
 ### 7.4 回滚
 
@@ -314,6 +473,16 @@ Release notes 由 `.github/release.yml` 按 **PR 标签**归类（GitHub 的生�
 node scripts\validate-json5.mjs    # 配置语法 + 跨文件一致性
 ```
 
+```powershell
+# 发布（自托管 runner 未就绪时走这条；产物名与版本规则与 CI 完全一致）
+.\scripts\release-preflight.ps1 -RequireDeveco     # 这台机器能不能编 HAP
+.\scripts\release-local.ps1 -Tag v0.1.0            # 构建 + 生成产物（不发布）
+.\scripts\release-local.ps1 -Tag v0.1.0 -SkipBuild # 只重跑产物打包
+.\scripts\release-local.ps1 -Tag v0.1.0 -Publish   # 建 draft Release（-Draft:$false 直接发）
+node scripts\changelog.mjs --tag v0.1.0            # 只预览变更日志
+node scripts\changelog.mjs --tag v0.1.0 --validate-only   # 只校验 tag↔版本号
+```
+
 ```bash
 # bash 等价物
 bash scripts/verify-repo.sh [--staged-only] [--json]
@@ -324,4 +493,9 @@ bash scripts/install-hooks.sh [--status|--uninstall]
 # 只跑 CI 里那一项（排查"为什么 CI 红"）
 .\scripts\verify-repo.ps1 -Json            # 机器可读
 .\scripts\verify-repo.ps1 -StagedOnly      # 复现 pre-commit 的视角
+cd entry\src\main\golang                   # Go 门禁（本机无 C 编译器 → 只有 CGO_ENABLED=0 那一半）
+gofmt -l .; go build ./...; go vet ./...; go test ./... -count=1
 ```
+
+> ⚠️ 上面 Go 那行**只覆盖纯 Go 半边**：`main.go` / `main_test.go` 带 `//go:build cgo`，
+> 本机没有 C 编译器，所以它们**根本不在编译集里**。完整覆盖在 CI（见 3.4 节）。

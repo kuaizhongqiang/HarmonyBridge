@@ -58,7 +58,7 @@
     - `startVpnExtensionAbility(want)` / `stopVpnExtensionAbility(want)` — 拉起/停止 VPN 扩展
     - `createVpnConnection(context): VpnConnection` — 建立 VPN 连接对象
     - `VpnConnection.create(config): Promise<number>` — **返回虚拟网卡（vNIC）的文件描述符**
-    - `VpnConnection.protect(socketFd)` — 让指定 socket 绕过 VPN，**防回环必需**
+    - `VpnConnection.protect(socketFd)` — 让指定 socket 绕过 VPN（⚠️ 本项目数据面**不使用**它，见下方「数据面」裁决；防环改用 `blockedApplications`）
     - `VpnConnection.protectProcessNet()`（`@since 22`）
     - `VpnConnection.destroy()` / `destroy(vpnId)`（`@since 20`）、`generateVpnId()`（多 VPN，仅 IPv4）
     - `createVpnObserver()` + `VpnObserver.onAuthorizationResult()`（`@since 26.0.0`）— 用户授权弹窗结果回执
@@ -346,8 +346,9 @@ Conventional Commits，由 `.githooks/commit-msg` 强制：
 3. **B3 · 没有鸿蒙真机**（且模拟器大概率不支持 VPN、本机无镜像）。VPN 链路、授权弹窗、`vpn-tun`
    虚拟网卡、内核接入，全部只能在真机上验证。**设备预计数天内到位。**
 4. ~~**B4 · 许可决策未定**~~ → **已决策：自用，MIT + MPL-2.0 的 Xray-core**。
-5. **契约已冻结但实现未跟上**：见 [`docs/design/ipc-contract.md`](docs/design/ipc-contract.md) §5
-   的《原生侧待收敛清单》。在此之前 `MOCK_BRIDGE` **必须保持 `true`**。
+5. **契约已冻结，原生实现已按 §5 收敛**（2026-10-11 静态核对，逐项证据见
+   [`docs/design/ipc-contract.md`](docs/design/ipc-contract.md) §5）；`MOCK_BRIDGE` **仍必须保持
+   `true`**，但理由已变为**没有真机 / `libcore.so` 未产出 / 真实链路无法验证**。
 
 ### 已解除的疑问（不再当成风险）
 
@@ -362,7 +363,7 @@ Conventional Commits，由 `.githooks/commit-msg` 强制：
 | `libcore.so` ~32 MB | HAP 体积大 | 按 ABI 拆分、release 剥离符号、评估裁剪功能集 |
 | 跨 C 边界 panic | 整个 VPN 进程崩溃 | `GoInvoke` 内强制 `recover`；信封返回错误 |
 | VPN 扩展进程被系统回收 | 断流 | 前台常驻通知 + 断线重连状态机 |
-| 回环（代理流量又进 VPN） | 直接断网 | **必须**对出站 socket 调 `protect(fd)`；这是 xray tun 入站的硬要求 |
+| 回环（代理流量又进 VPN） | 直接断网 | 改用 **`VpnConfig.blockedApplications`**（把自身包名加入），让应用自身 egress 不回到 TUN，**不需要 `protect()`**（裁决见 `docs/design/ipc-contract.md` §2 与本文件 §2「数据面」）。接线已落地：`ets/vpnability/VpnAbility.ets#buildVpnConfig` 设置 `blockedApplications: [本应用包名]`。❓ **真机未验证**：该字段是否确实止住环路**只能在真机上确认**（连此字段的来源代码都自标"未验证"） |
 | 用户授权被拒 / 用户类型受限 | 无法建 VPN | 处理 `2203001` 与 `onAuthorizationResult`，给出可理解的提示 |
 | geoip/geosite 体积 | HAP 膨胀 | **已裁决：按需下载**（不打包）。落点 `<filesDir>/assets`，来源与 v2rayN 同源（`Global.GeoUrl` → Loyalsoldier/v2ray-rules-dat）。实现见 `ets/service/GeoAssetService.ets`；缺失时生成器会降级并在 `notes` 里说明。**注意这条尚未在真机验证过下载** |
 
@@ -392,8 +393,10 @@ Conventional Commits，由 `.githooks/commit-msg` 强制：
    → 这一步能单独验证"平台能力"，与内核解耦，**务必先做**。
 3. 编译 `libcore.so`（`scripts/build-core.*`），确认能 `dlopen` 并拿到 `GoInvoke` 符号；
    先跑 `VersionService.GetVersion` 这种无副作用的调用，验证桥接链路。
-4. 把 vNIC fd 交给 Xray-core 的 tun 入站，最小配置（单节点 freedom/vless 出站 + tun 入站），
-   确认能连通；**同时验证 `protect(fd)` 是否让出站流量真正绕开 VPN**（不做必断网）。
+4. 把 vNIC fd 交给 **tun2socks**（`libhevsocks5tun.so`，见 `docs/00-技术路线可行性.md` §11 与
+   `scripts/build-tun2socks.*`），**内核只做本地 SOCKS/HTTP 入站**；最小配置（单节点 freedom/vless 出站 +
+   **本地 socks 入站**），确认 **TUN → tun2socks → `127.0.0.1:<socksPort>` 的出网链路**能连通；
+   **同时验证把自身包名放进 `blockedApplications` 后应用自身 egress 不回到 TUN、无环路**（不做必断网）。
 5. 补 `VPN_TRAFFIC` 公共事件回传，确认应用进程能显示上下行速率。
 6. 最后才做规则分流（geoip/geosite）、订阅导入、按应用分流（`trustedApplications`/`blockedApplications`）。
 
@@ -411,7 +414,7 @@ Conventional Commits，由 `.githooks/commit-msg` 强制：
 | **libcore.so** | Go 用 `-buildmode=c-shared` 编出的 Xray-core，导出 `GoInvoke` |
 | **libbridge.so** | 本项目的 NAPI C++ 桥，把 ArkTS 调用转成对 `GoInvoke` 的调用 |
 | **信封（envelope）** | 跨 C/JSON 边界的统一返回结构 `{success, result, error}` |
-| **protect(fd)** | 让某个 socket 走物理网络、不进 VPN，防回环的关键 API |
+| **protect(fd)** | SDK 提供的「让指定 socket 绕过 VPN、走物理网络」的 API；**在本项目的数据面模型下不需要它**（防环靠把自身包名放进 `VpnConfig.blockedApplications`，见 §2「数据面」）。保留该词条是为了让人知道**为什么不用**它 |
 | **OHOS NDK** | `...\sdk\default\openharmony\native`，含 clang/llvm 与 musl sysroot |
 | **HAP** | HarmonyOS Ability Package，应用安装包 |
 

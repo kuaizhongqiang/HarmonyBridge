@@ -125,24 +125,32 @@ panic 穿越 C ABI 会让进程直接 abort，UI 连提示都来不及显示。�
 
 | 服务名 | 参数 | 结果 | 备注 |
 | --- | --- | --- | --- |
-| `CoreService.Start` | `{fd, assetLocation, configLocation, start}` | `{started, configLoaded, configBytes, wired, fd, version, notes[]}` | `start` 缺省 **false**（只校验） |
-| `CoreService.Stop` | `{}` | `{stopped}` | 幂等；会清掉 `xray.tun.fd` |
-| `CoreService.Status` | `{}` | `{running, version, fd, lastError?}` | |
 | `VersionService.GetVersion` | `{}` | `{version, semver, bridge, go}` | `bridge` 是 IPC 契约版本，用于发现新旧不匹配 |
+| `CoreService.Start` | `{configLocation, assetLocation, start?, fd?（reserved）, socksPort?, httpPort?}` | `{started, configLoaded, configBytes, wired, socksPort, httpPort, version, notes[]}` | `start` 缺省 **false**（只校验）。**没有 `fd`**：字段保留但不读，见 §5.1/§6.5 |
+| `CoreService.Stop` | `{}` | `{stopped}` | 幂等；会把 RuntimeInfo 的端口与配置路径一并清零 |
+| `CoreService.Status` | `{}` | `{running, version, lastError?}` | **无 `fd`**（契约 §5.6） |
+| `CoreService.RuntimeInfo` | `{}` | `{socksPort, httpPort, configLocation?, note?}` | 从未 Start 过时返回默认端口 + 空路径 + 说明 |
+| `ConfigService.Generate` | `{nodeId, routingMode, extra, assetDir, bypassChina?}` | `{configJson, socksPort, httpPort, outboundTag, protocol, transport, security, geoAssets, notes[]}` | 返回**文本**，落盘由 ArkTS 做 |
 | `LogService.Tail` | `{limit}` | `{lines[], count}` | 环形缓冲，默认 512 行，不落盘（隐私） |
 | `LogService.Clear` | `{}` | `{cleared}` | |
-| `PingService.Tcping` | `{host, port, timeoutMs?}` | `{delayMs, reachable, address, ip, resolveMs, error?}` | 裸 TCP 握手耗时，**不经过 Xray** |
+| `PingService.Tcping` | `{host, port, timeoutMs?}` | `{latencyMs, reachable, address, ip, resolveMs, error?}` | 裸 TCP 握手耗时，**不经过 Xray** |
+| `PingService.SpeedTest` | `{}` | `{speedBps, notes[]}` | **占位**：`speedBps` 恒 0，`notes` 说明原因；**绝不填假数据** |
 | `ValidatorService.ValidateConfig` | `{config?, configLocation?, configPath?}` | `{valid, errors[], inboundTags[], outboundTags[]}` | 交给 Xray 自己的管线判定 |
 
 这份清单被 `main_test.go` 的 `expectedRoutes` 固化：增删路由会导致测试失败，
-因为对 ArkTS 来说那是破坏性变更。
+因为对 ArkTS 来说那是破坏性变更。**本表已于 2026-10-11 与契约 §4 对齐**（11 条路由）；
+权威描述仍是 [`ipc-contract.md`](ipc-contract.md) §4。
 
 ### 4.1 为什么 `CoreService.Start` 默认不启动
 
 `start` 缺省为 `false`，只做「读配置 → 用 Xray 的 loader 解析 → 校验」。
-原因见 §6.5：目前没有任何可用方式把 tun fd 交给 Xray 的入站，贸然启动会得到
-一个**没有任何可用入站**的进程，比不启动更难排查。所以骨架先保证
-「配置对不对」这个最有价值的判断可用。
+
+⚠️ **理由已随裁决更新（原表述过时）**：原文写的是"目前没有任何可用方式把 tun fd 交给
+Xray 的入站"。冻结裁决（[`ipc-contract.md`](ipc-contract.md) §2）**不再走这条路** ——
+vNIC fd 交给 tun2socks，内核只做本地 SOCKS/HTTP 入站。真实理由是：**本地 SOCKS/HTTP
+入站的监听与 tun2socks 都还没有实现**，此刻启动只会得到一个**没有任何进程在监听**的进程，
+比不启动更难排查。所以 `wired` 目前**恒为 false**，骨架先保证「配置对不对」这个最有价值的
+判断可用。
 
 ## 5. 构建管线
 
@@ -375,8 +383,19 @@ AssetLocation = "xray.location.asset"
 * 这部分**完全没有 OHOS 侧实测**；
 * `CoreService.Start` 因此把结果里的 `wired` 恒置为 `false`，并在 `notes` 里
   明确写出「实例已启动但没有可用入站」；
-* 在没有真机验证之前，`registry` 包**刻意不导入** `proxy/tun`（否则只会引入
-  默认空实现，徒增体积与误导）。
+* ⚠️ **`CoreService.Start` 现在连 `xray.tun.fd` 都不再设置了**（2026-10-11）：
+  `StartRequest.Fd` 降为 **reserved 字段、只读不写**（`golang/service/core/core.go:71-76`、
+  `:245-254`），传了也只在 `notes` 里如实说明"保留、未使用"。所以上表里"实际会编入
+  Android 后端"这件事，**在本项目的代码路径上已经不会被触发** —— 保留它是为了解释
+  "为什么当初没走通"，不是待办；
+* ⚠️ ~~在没有真机验证之前，`registry` 包**刻意不导入** `proxy/tun`（否则只会引入
+  默认空实现，徒增体积与误导）~~ —— **此句与事实不符**：`proxy/tun` 一直在二进制里
+  （`registry` → `main/json` → `infra/conf` **直接**导入并使用 `proxy/tun`，其
+  `init()` 会 `RegisterConfig`）。事实修正见本文件 §7.4 第 3 条。
+
+> ⚠️ **这条链本身也已改判（冻结裁决 `ipc-contract.md` §2）**：下面这份"把 fd 交给 Xray 的
+> tun 入站"的清单**不再是要做的事** —— vNIC fd 改交 **tun2socks**，内核只做本地
+> SOCKS/HTTP 入站（见 `docs/00-技术路线可行性.md` §11）。清单保留为历史记录。
 
 **打通这条链需要做的（留给下一阶段）**：
 
@@ -388,6 +407,10 @@ AssetLocation = "xray.location.asset"
 5. 真机实测：`Wired=true`、能 ping 通、能解析 DNS。
 
 ### 6.6 socket protect（`VpnConnection.protect`）—— 【未解决，且目前无接口】
+
+> ⚠️ **改判（冻结裁决 `ipc-contract.md` §2）**：本项目**不再解决这个问题，也不再使用
+> `protect()`** —— 防环改由把自身包名放进 `VpnConfig.blockedApplications` 实现。
+> 下面记录的是"原方案为什么走不通"的证据，保留不改；**该问题已不在关键路径上**。
 
 Android 上 Xray 生成的每个出站 socket 都必须 `protect()`，否则内核把它重新吞回
 tun，形成**无限路由环路**（表现为连接卡死而非报错）。
@@ -455,7 +478,7 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
 | `startCore` 结果 | `{started, configLoaded, configBytes, wired, fd, version, notes[]}` | `{pid, socksPort, httpPort}` |
 | 版本结果 | `{version, semver, bridge, go}` | `{version}` |
 | 状态结果 | `{running, version, fd, lastError?}` | `{running, pid, version}` |
-| 延迟测试 | `PingService.Tcping` + `{host, port, timeoutMs}` → `{delayMs, reachable, address, ip, resolveMs, error?}` | `testLatency` + `{address, port, timeoutMs}` → `{latencyMs, timeout}` |
+| 延迟测试 | `PingService.Tcping` + `{host, port, timeoutMs}` → `{latencyMs, reachable, address, ip, resolveMs, error?}`（字段原名 `delayMs`，2026-10-11 已按契约 §5.3 改名） | `testLatency` + `{address, port, timeoutMs}` → `{latencyMs, timeout}` |
 | 配置校验 | `ValidatorService.ValidateConfig` + `{config, configLocation, configPath}` → `{valid, errors[], …}` | `validateNode` + `?` → `{valid}` |
 | 未实现的能力 | — | `testSpeed`、`runtimeInfo`（`generateConfig` 见 §7.4） |
 
@@ -494,8 +517,11 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
 §7.1~§7.3 记录的是两侧分歧当时的快照，**保留不改**。此后发生的变化登记在此：
 
 1. **契约已收敛**：权威定义在 [`ipc-contract.md`](ipc-contract.md)，UI 侧
-   `Bridge.ets` 已全部改为 `Group.Method` 命名。§7.1 表里的"未实现的能力"只剩
-   `testSpeed` 与 `runtimeInfo`。
+   `Bridge.ets` 已全部改为 `Group.Method` 命名。§7.1 表里的"未实现的能力"
+   （`testSpeed`、`runtimeInfo`）**已于 2026-10-11 实现并注册** ——
+   见 `golang/service/ping/ping.go`（`SpeedTest`，占位：`speedBps` 恒 0 + `notes`）
+   与 `golang/service/core/core.go`（`RuntimeInfo`，返回最近一次 Start 声明的端口
+   与配置文件路径）。契约 §5 的《原生侧待收敛清单》**七项已全部落地**。
 
 2. **`generateConfig` 的归属已裁决：放在原生侧，不是 ArkTS 侧的 `CoreConfigManager`。**
    §7.3 第 4 条给了两个选项，选后者的理由只有一条但足够硬：**只有 Go 侧能链接
@@ -513,7 +539,9 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
    另外 `tun_android.go` 的 build tag 是 `//go:build android`，空实现是
    `tun_default.go`（`!linux && !windows && !android && !darwin`），GOOS=android
    下选中的并不是空实现。**§6.5 的 TODO 第 4 步（往 registry 里加 proxy/tun）因此
-   已经自动满足**，剩下要做的只有 fd handoff 与 socket protect 本身。
+   已经自动满足**。~~剩下要做的只有 fd handoff 与 socket protect 本身~~ —— ⚠️ 这两项
+   **均已被冻结裁决取代**：fd 交给 tun2socks（内核不接管 tun）、防环改用
+   `VpnConfig.blockedApplications`，见 `ipc-contract.md` §2。
 
 4. **rule 模式在没有 geo 资源时会主动降级**：内核装载 `geoip:`/`geosite:` 规则时
    缺文件是**硬失败**（`failed to open file: geoip.dat`，会让整份配置被拒），
@@ -585,6 +613,35 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
    这份配置"，**没有任何一条在真机上跑过流量**，所以"大陆域名确实直连了"
    依旧属于 ❓ 而非 ✅。资源就位后的分支更是连 loader 都过不了
    （本地没有 `.dat`），只有一条负向断言守着它（见下）。
+
+### 7.5 现状更新（2026-10-11，契约 §5 收敛这一轮）
+
+本轮把 [TODO.md](../../TODO.md) 里**能在本机验证的部分**做完了，并顺带查出四个既有缺陷。
+登记在此，避免下次重复讨论：
+
+1. **`main.go` 曾有一个已提交的编译错误**（本轮修复，属**新发现**）：
+   `params := "{}"` 被粘进了上一行的注释里，于是 `params` **从未声明**，
+   而 `GoInvoke` 后面直接使用它 → 只要 `CGO_ENABLED=1` 就必然 `undefined: params`。
+   **为什么一直没发现**：`main.go` 与 `main_test.go` 都带 `//go:build cgo`，
+   而本机没有 C 编译器 → `CGO_ENABLED=0` 下**整个 cgo 包被构建约束排除**，
+   `go build ./...` 于是绿着，报错完全隐形。修好后 cgo 侧仍**未在本机验证**
+   （没有 gcc/clang），改由 CI 的 `CGO_ENABLED=1` 步骤覆盖（见
+   `.github/workflows/verify.yml` 的 `go` job）。已记入 `TODO.md` §2.6。
+
+2. **`CoreService.Start` 不再设置 `xray.tun.fd`**：`fd` 降为 reserved，见 §6.5。
+
+3. **端口现在只有一份权威来源**：`service/config` 的 `DefaultSocksPort` /
+   `DefaultHTTPPort`（10808 / 10809）。`CoreService.Start` 接受可选的
+   `socksPort`/`httpPort`（非法值回落到默认，并在 `notes` 里说明），
+   `ConfigService.Generate` 把同一对端口写进生成的配置里。ArkTS 侧此前有
+   **三到四处各自写死的 10808**，现已统一（见 `docs/design/ui.md` §5.7）。
+
+4. **`PingService.Tcping` 的 `delayMs` → `latencyMs` 已落地**，ArkTS 侧本来就按
+   `latencyMs` 解析，所以这条改的是**真 bug**（否则真机上一辈子拿不到延迟）。
+
+5. **`Wired` 仍然恒为 false，这是正确的**：本地 SOCKS/HTTP 监听与 tun2socks
+   都没有实现，所以"没有任何进程真的在监听"。`SpeedTest` 同理返回 0 + `notes`。
+   **不要把这两个值"顺手填上"**。
 
 ## 8. 测试与验收
 
