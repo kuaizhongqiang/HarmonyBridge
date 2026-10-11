@@ -251,7 +251,17 @@ jobs:
           ((Get-Content $log -Raw) -replace "\x1b\[[0-9;]*m", '') -split "`r?`n" |
             Where-Object { $_ -match 'BUILD|ERROR|Error Message|Finished :entry:default@CompileArkTS' } |
             ForEach-Object { Write-Host $_ }
-          if ($code -ne 0) { throw "assembleHap failed with exit code $code" }
+          if ($code -ne 0) {
+            # hvigor's summary often says only "Error Code: 00308018 Unknown Error",
+            # which is useless on its own (it means "java is not on PATH"). Always
+            # dump the tail of the real log so the next failure is diagnosable
+            # from the Actions page alone.
+            Write-Host '::group::hvigor log tail (last 60 lines)'
+            ((Get-Content $log -Raw) -replace "\x1b\[[0-9;]*m", '') -split "`r?`n" |
+              Select-Object -Last 60 | ForEach-Object { Write-Host $_ }
+            Write-Host '::endgroup::'
+            throw "assembleHap failed with exit code $code"
+          }
 
       - name: Expect an unsigned HAP and nothing else
         shell: powershell

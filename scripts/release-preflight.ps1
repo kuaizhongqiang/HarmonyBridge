@@ -92,6 +92,17 @@ function Export-Env {
     }
 }
 
+# Add a directory to PATH for the steps that follow. Under GitHub Actions this
+# must go through GITHUB_PATH, not GITHUB_ENV.
+function Export-Path {
+    param([Parameter(Mandatory = $true)][string] $Dir)
+    if ([string]::IsNullOrWhiteSpace($Dir) -or -not (Test-Path -LiteralPath $Dir -PathType Container)) { return }
+    $null = $script:Exported.Add("PATH+= $Dir")
+    if ($env:GITHUB_PATH) {
+        Add-Content -LiteralPath $env:GITHUB_PATH -Value $Dir -Encoding utf8
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 1. DevEco Studio
 # ---------------------------------------------------------------------------
@@ -137,15 +148,29 @@ if ([string]::IsNullOrWhiteSpace($java) -and $devecoPresent) {
 }
 # Without JAVA_HOME, hvigor fails with "spawn java ENOENT".
 $javaOk = $false
+$javaBin = ''
 if ($java -and (Test-Path -LiteralPath (Join-Path $java 'bin') -PathType Container)) {
     $javaOk = $true
+    $javaBin = Join-Path $java 'bin'
 } elseif (Get-Command java -ErrorAction SilentlyContinue) {
     $javaOk = $true
     $java = (Get-Command java).Source
+    $javaBin = Split-Path -Parent $java
 }
 Add-Check -Name 'Java runtime' -Ok $javaOk `
     -Detail "$java$(if ($javaOk) { '' } else { ' (not found; hvigor reports "spawn java ENOENT")' })" `
     -Fatal:$RequireDeveco
+
+# `java` must also be ON PATH, not only in JAVA_HOME. Measured: with
+# JAVA_HOME set but no java on PATH, `hvigorw assembleHap` fails at
+# PackageHap with `Error Code: 00308018 Unknown Error` - which reads like a
+# packaging bug and says nothing about Java. That is exactly how the runner
+# failed on its second attempt, while every local test passed because a
+# developer shell happens to have Java on PATH already.
+$javaOnPath = [bool](Get-Command java -ErrorAction SilentlyContinue)
+Add-Check -Name 'java on PATH' -Ok $javaOnPath `
+    -Detail $(if ($javaOnPath) { (Get-Command java).Source } else { "adding $javaBin to PATH" })
+if (-not $javaOnPath -and $javaBin) { Export-Path -Dir $javaBin }
 
 # ---------------------------------------------------------------------------
 # Export the resolved paths for the following steps (see Export-Env).

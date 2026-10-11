@@ -131,6 +131,20 @@ try {
     $preflightCode = $LASTEXITCODE
     Get-Content -LiteralPath $preflightLog | ForEach-Object { Write-Host $_ }
     if ($preflightCode -ne 0) { throw 'preflight reported the machine is not ready' }
+    # The preflight writes PATH repairs to GITHUB_PATH, which only means
+    # something under GitHub Actions. Locally, take it from there: hvigor needs
+    # `java` on PATH, not just JAVA_HOME (JAVA_HOME alone fails the HAP packaging
+    # step with a bare "Error Code: 00308018 Unknown Error").
+    $resolvedJava = $env:JAVA_HOME
+    if ([string]::IsNullOrWhiteSpace($resolvedJava)) { $resolvedJava = Join-Path $deveco 'jbr' }
+    $resolvedJavaBin = Join-Path $resolvedJava 'bin'
+    if (Test-Path -LiteralPath $resolvedJavaBin -PathType Container) {
+        $env:JAVA_HOME = $resolvedJava
+        if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
+            $env:PATH = "$resolvedJavaBin;$env:PATH"
+            Write-Host "java was not on PATH; added $resolvedJavaBin"
+        }
+    }
 
     # -----------------------------------------------------------------------
     # 2. Version agreement (delegated to the same script CI uses)
