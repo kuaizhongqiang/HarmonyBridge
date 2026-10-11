@@ -3,17 +3,22 @@
 > **这份是给"另一台 Linux 机器"的独立清单**：每一步都能复制粘贴，都写了预期输出与失败怎么记。
 > 背景与设计依据见 [`06-OHOS-Go工具链自研任务书.md`](06-OHOS-Go工具链自研任务书.md)。
 >
-> **分工（2026-10-11 定）**
+> **分工（2026-10-11 定，第二轮更新）**
 >
 > | 谁 | 干什么 |
 > | --- | --- |
-> | **本机（Windows）** | 移植的**开发**工作：拿上游 Go 树、写移植、生成 patch 系列 |
-> | **Linux 机器** | **构建与验证**：`make.bash` 编工具链、用工具链编 `libcore.so`、跑 TLS 验收 |
+> | **本机（Windows）** | 移植的**开发**工作 —— ✅ **已全部完成，并在 Windows 上实测通过** |
+> | **Linux 机器** | **独立复核 + 加固**：同一 patch 编一遍、跑验收、跑 `go build std` / `go test` 抽样 |
 >
-> **为什么这么分**：移植本身是"改代码"，不需要 Linux；而"能不能编出可用产物"**只能**在 Linux 上验。
-> Linux 机器不用做判断性工作，只要**如实带回构建输出**。
+> **⚠️ 优先级变了**：这一轮**不再是"补做一台机器才能验的活"**，而是"**换一台机器独立复核**"。
+> Windows 侧已经编出 `libcore.so` 并拿到 `PT_TLS` + `R_AARCH64_TLSDESC`（见
+> [`08`](08-OHOS移植执行笔记.md) §0）。你在 Linux 上的价值因此集中在**两件事**：
+> 1. **独立复现**（同一 patch 在另一 OS / 另一编译器上是否等价）；
+> 2. **跑 Windows 侧跑不了的那部分**：`go build std`、`go test` 抽样（P3）——
+>    **P3 才是这次最有价值的一步**，它会暴露"移植还缺什么"。
 >
 > **路线已定：1A** —— 把官方 SIG 的移植**往前搬到 go1.26**，不降 xray-core。
+> **P0/P1 现在是"可选的历史对照"**（用来取得 SIG/go1.24 的参照读数），不再是必经步骤。
 
 ---
 
@@ -117,9 +122,21 @@ $B/llvm-readelf -d libcore-sig.so | grep NEEDED          # ★ 不应出现 libl
 
 ---
 
-## P2 · 编"我们自己的移植"（等本机出 patch 后再做）
+## P2 · 编"我们自己的移植"（**★ 现在就能做，patch 已交付**）
 
-本机会把一个 **patch 系列**（基于上游 `go1.26.5` + 我们自己的移植）交给你。
+**本机已经把 patch 交给仓库**：
+`tools/ohos-port/our-ohos-port-on-go1.26.5.patch`（102,735 B，90 文件，+1349/−234）。
+
+它基于**上游 `go1.26.5`**，是**全量补丁**（含 CLEAN-57 + 本轮重放的 DRIFT 生产代码），
+🧪 **已在全新 `go1.26.5` 树上实测 `git apply` 干净落地并编出工具链**。
+
+> 💡 **一个必须知道的坑（本机实测）**：**go build cache 会跨 GOROOT 树复用 `runtime` 的目标文件**。
+> 改过汇编器之后，即使在一棵全新的树里构建，也可能报
+> `runtime.load_g: bad reloc size 0x10 for runtime.tls_g` —— 那是 **cache 陈旧**，不是移植坏了。
+> 对策：**给这次验收用一个全新的 `GOCACHE`**：
+> ```bash
+> export GOCACHE=~/opt/gocache-ohos-verify
+> ```
 
 ```bash
 # 2.1 上游树
@@ -127,9 +144,10 @@ git clone --filter=blob:none --branch go1.26.5 --single-branch \
   https://github.com/golang/go.git ~/opt/go-ourport
 cd ~/opt/go-ourport && git checkout go1.26.5
 
-# 2.2 套我们的 patch（文件名以实际交付为准）
-git apply --3way /path/to/our-ohos-port.patch
+# 2.2 套我们的 patch
+git apply --3way /path/to/our-ohos-port-on-go1.26.5.patch
 # 若有冲突：不要自己"猜着修" —— 把冲突文件列表与 git diff 原文贴回来，本机处理
+# ⚠️ 但在 Linux 上也应干净套用（Windows 侧全新树实测通过）
 
 # 2.3 编
 cd src && GOROOT_BOOTSTRAP=~/opt/go1.26.9 ./make.bash
@@ -138,7 +156,7 @@ cd .. && ./bin/go version                      # 期望: go1.26.x linux/amd64
 ```
 
 ```bash
-# 2.4 冒烟测试：先证明"工具链本身对"，再碰 33 MB 的内核
+# 2.4 冒烟测试：先证明"工具链本身对"，再碰 34 MB 的内核
 mkdir -p ~/opt/smoke && cd ~/opt/smoke
 cat > main.go <<'EOF'
 package main
@@ -152,14 +170,37 @@ func Hello() *C.char { return C.CString("hi " + fmt.Sprint(42)) }
 
 func main() {}
 EOF
-$B/clang --version >/dev/null   # B 见 P1
-GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1 CC=$B/clang \
+cat > go.mod <<'EOF'
+module smoke
+
+go 1.26
+EOF
+export B=$OHOS_NDK_HOME/llvm/bin
+GOOS=openharmony GOARCH=arm64 CGO_ENABLED=1 \
+  CC=$B/clang AR=$B/llvm-ar \
+  CGO_CFLAGS="--target=aarch64-linux-ohos --sysroot=$OHOS_NDK_HOME/sysroot" \
+  CGO_LDFLAGS="--target=aarch64-linux-ohos --sysroot=$OHOS_NDK_HOME/sysroot -fuse-ld=lld" \
   ~/opt/go-ourport/bin/go build -buildmode=c-shared -o libsmoke.so .
-$B/llvm-readelf -r libsmoke.so | grep -i tls    # ★ 期望: R_AARCH64_TLSDESC
-$B/llvm-readelf -l libsmoke.so | grep -i tls    # ★ 期望: 有 TLS 段
+$B/llvm-readelf -h libsmoke.so | grep -E 'Class|Type|Machine'  # ★ ELF64 / DYN / AArch64
+$B/llvm-readelf -l libsmoke.so | grep -i tls                    # ★ 有 PT_TLS
+$B/llvm-readelf -r libsmoke.so | grep -i tls                    # ★ R_AARCH64_TLSDESC
+$B/llvm-nm -D --defined-only libsmoke.so | grep Hello           # ★ 导出 Hello
 ```
 
 > ⚠️ **如果 10 行的冒烟库都拿不到 `TLSDESC`，就别去查 libcore.so** —— 先修工具链。
+> 另注：`go.mod` 必须是**无 BOM** 的 UTF-8（Linux 下用 heredoc 一般没问题）。
+
+**本机 Windows 侧的实测读数**（你应当拿到同样形态的结果）：
+
+```text
+Class: ELF64 | Type: DYN | Machine: AArch64
+TLS        0x1c2cfa0 0x0000000001c2dfa0 0x0000000001c2dfa0 0x000000 0x000010 R  0x8
+0000000002040d70  0000000000000407 R_AARCH64_TLSDESC                 0
+0000000001c2c258 T GoFreeCString
+0000000001c2c1e4 T GoInvoke
+NEEDED: libohcommonevent.so / libhilog_ndk.z.so / libtime_service_ndk.so / libc.so   （无 liblog.so）
+大小: 34,560,600 B
+```
 
 ```bash
 # 2.5 用我们的工具链编 libcore.so，跑与 P1 完全相同的五条验收
@@ -172,16 +213,24 @@ export PATH=~/opt/go-ourport/bin:$PATH
 
 ---
 
-## P3 · 跑一次工具链自检（证明不是"只能编我们这一个项目"）
+## P3 · 跑一次工具链自检（**★ 这次最重要的 P**）
+
+Windows 侧只跑了 `go build std`（宿主）与 6 个目标的 hello 编译；
+**完整测试套件没跑**（见 [`08`](08-OHOS移植执行笔记.md) §7 ❓2）。这正是你在 Linux 上最该补的：
 
 ```bash
 cd ~/opt/go-ourport/src
 # 只跑最小集合，不求全绿；目的是暴露"移植哪里还漏了"
 ../bin/go test -count=1 -run 'TestTLS|TestG' runtime 2>&1 | tail -30
 ../bin/go build std 2>&1 | tail -20
+# 再补一件 Windows 侧没做的：
+GOOS=openharmony GOARCH=arm64 CGO_ENABLED=0 ../bin/go build std 2>&1 | tail -30
 ```
 
 **报告里写清**：哪些包编不过、报什么错。**这些错就是移植还缺什么**。
+
+> 预期：因为测试桩（DRIFT 组里的 `*_test.go`）还没全补，测试套件**会有失败**。
+> 那是**已知且已记录**的，不要试图"修到全绿"，如实带回即可。
 
 ---
 
