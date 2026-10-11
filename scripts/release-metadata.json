@@ -1,0 +1,89 @@
+{
+  "_comment": [
+    "发布语义的唯一定义处。CI workflow、本地发布脚本、生成变更日志的脚本与文档",
+    "全部读这一份，避免三处各写一套规则而漂移。",
+    "改动本文件等于改发布契约，必须同时更新 docs/design/ci.md 与 .github/workflows/release.yml。"
+  ],
+
+  "version": {
+    "tagPrefix": "v",
+    "tagPattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$",
+    "manifest": "AppScope/app.json5",
+    "agreementRule": "tag 去掉前缀后必须与 app.json5 的 versionName 完全相等，否则发布失败",
+    "versionCodeRule": "versionCode 必须单调递增（人工保证，脚本只做提醒，不做断言）"
+  },
+
+  "artifacts": {
+    "unsignedHapName": "harmonybridge-unsigned.hap",
+    "releaseHapNameTemplate": "harmonybridge-{version}-unsigned.hap",
+    "checksumsName": "SHA256SUMS.txt",
+    "releaseNotesName": "RELEASE_NOTES.md",
+    "signed": false,
+    "signedNote": "本仓库的发布流水线不签名：没有签名材料，也不允许把签名材料写进仓库或 secrets。"
+  },
+
+  "paths": {
+    "unsignedHap": "entry/build/default/outputs/default/entry-default-unsigned.hap",
+    "hapSearchGlob": "entry/build/**/outputs/**/*.hap"
+  },
+
+  "build": {
+    "product": "default",
+    "buildMode": "release",
+    "task": "assembleHap",
+    "extraArgs": "--no-daemon",
+    "cleanFirst": true,
+    "sdkEnv": "DEVECO_SDK_HOME",
+    "javaEnv": "JAVA_HOME",
+    "hvigorRelative": "tools/hvigor/bin/hvigorw.bat",
+    "ohpmRelative": "tools/ohpm/bin/ohpm.bat",
+    "defaultDevecoHome": "D:\\Harmony\\DevEco Studio",
+    "timeoutMinutes": 60
+  },
+
+  "runner": {
+    "hostedLabel": "ubuntu-latest",
+    "windowsHostedLabel": "windows-latest",
+    "selfHostedLabels": ["self-hosted", "harmonyos", "windows"],
+    "selfHostedRequiredEnv": ["DEVECO_HOME"],
+    "note": "自托管 runner 负责 assembleHap 与发布；托管 runner 负责门禁与 dry-run。"
+  },
+
+  "signing": {
+    "enabled": false,
+    "requiredSecrets": [
+      "HB_SIGN_KEYSTORE",
+      "HB_SIGN_KEYSTORE_PWD",
+      "HB_SIGN_KEY_ALIAS",
+      "HB_SIGN_KEY_PWD",
+      "HB_SIGN_CERT",
+      "HB_SIGN_PROFILE"
+    ],
+    "note": "刻意留空未启用。启用时把 enabled 改为 true 并补齐 workflow 里的签名步骤。"
+  },
+
+  "changelog": {
+    "types": ["feat", "fix", "perf", "refactor", "docs", "test", "build", "ci", "chore", "revert", "style"],
+    "defaultTypeTitle": "其他变更",
+    "titles": {
+      "feat": "🚀 新功能",
+      "fix": "🐛 缺陷修复",
+      "perf": "⚡ 性能优化",
+      "refactor": "♻️ 重构",
+      "docs": "📝 文档",
+      "test": "🧪 测试",
+      "build": "📦 构建与依赖",
+      "ci": "🔧 CI 与工程化",
+      "chore": "🧹 杂项",
+      "revert": "⏪ 回退",
+      "style": "🎨 样式"
+    },
+    "unknownRefFallback": "无前序 tag"
+  },
+
+  "localPublish": {
+    "ghCli": "gh",
+    "draftByDefault": true,
+    "command": "pwsh -File scripts/release-local.ps1 -Tag v0.1.0"
+  }
+}

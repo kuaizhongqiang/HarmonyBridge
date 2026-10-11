@@ -44,6 +44,11 @@
 /tmp/
 /scratch/
 
+# Staging directory of scripts/release-local.ps1. It holds a renamed copy of the
+# unsigned HAP plus SHA256SUMS.txt -- build outputs, and this repository never
+# tracks build outputs (AGENT.md section 1: "不提交任何构建产物").
+/release-out/
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db
