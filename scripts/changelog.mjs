@@ -84,13 +84,6 @@ function git(args, { optional = false } = {}) {
   }
 }
 
-/** All tags matching the configured pattern, newest first by semver precedence. */
-function listTags(pattern) {
-  const raw = git(['tag', '--list', pattern, '--sort=-v:refname'], { optional: true });
-  if (!raw) return [];
-  return raw.split('\n').map((line) => line.trim()).filter(Boolean);
-}
-
 // ---------------------------------------------------------------------------
 // Conventional Commit parsing
 // ---------------------------------------------------------------------------
@@ -280,11 +273,26 @@ function main() {
     return;
   }
 
-  const tags = listTags(`${metadata.version.tagPrefix}*`);
-  const previousTag =
-    args.from ||
-    tags.find((candidate) => candidate !== tag) ||
-    '';
+  // Previous tag = the most recent tag reachable from the PARENT of the commit
+  // being released. Stepping to the parent with `^` is what makes this correct:
+  // the tag being released usually points AT the released commit, so a naive
+  // "newest tag that is not mine" lookup still finds it (it is reachable from
+  // HEAD) and the notes then list the very commits being released. That is
+  // exactly what happened to the published v0.1.0 notes.
+  //
+  // `--exclude=<tag>` is belt-and-braces for the case where the tag does not
+  // point at HEAD at all, so the parent commit can still reach it.
+  //
+  // Empty result is legitimate and expected for the first release, where
+  // `<tag>^` has no tag before it.
+  let previousTag = args.from;
+  if (!previousTag) {
+    previousTag = git(
+      ['describe', '--tags', '--abbrev=0', `--exclude=${tag}`, `${tag}^`],
+      { optional: true }
+    );
+    if (previousTag === tag) previousTag = '';
+  }
 
   const range = previousTag ? `${previousTag}..${args.to}` : args.to;
   const commits = collectCommits(range);

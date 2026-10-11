@@ -246,6 +246,19 @@ runs-on: [self-hosted, harmonyos, windows]
    注册好 runner 之后，`git push` 一个 `v*` tag 即触发。
 5. 先在一个分支/预发布 tag（如 `v0.1.0-rc.1`）上验证，再打正式 tag。
 
+> ✅ **2026-10-11：这台机器已经注册好了**。`C:\actions-runner-harmonybridge`，
+> 名字 `DESKTOP-J1B0B8S-harmonybridge`，标签 `self-hosted` `Windows` `X64` `harmonyos`。
+> 通过 `run.cmd` **手动运行**（没有装成服务，所以重启后要重新拉起）。
+> 一次真实发布已经跑通：`v0.1.0`。
+>
+> ⚠️ **两个只在真机上才暴露的坑**（本机逐件测试时都漏掉了，详见 `TODO.md` §7.2b）：
+> 1. **`shell: pwsh` 在自托管 runner 上不存在** —— `pwsh` 是 PowerShell 7+，
+>    托管镜像自带，普通 Windows 只有 5.1。本仓库所有 Windows 步骤都用
+>    `shell: powershell`，脚本本身同时兼容 5.1 与 7。
+> 2. **`java` 必须在 `PATH` 上，不只是 `JAVA_HOME`** —— 否则 `assembleHap` 在
+>    `PackageHap` 报 `Error Code: 00308018 Unknown Error`，这条消息完全不提 Java。
+>    `release-preflight.ps1` 现在会检测并把 `<jbr>\bin` 写进 `GITHUB_PATH`。
+
 **没有 runner 时的替代路径**（本机就是 runner）：
 
 ```powershell
@@ -332,7 +345,8 @@ push tag v*
 | 缺口 | 现状 | 影响 | 何时能补 |
 | --- | --- | --- | --- |
 | **托管 runner 上不产出 HAP** | HAP 只在 `release.yml` 的 `publish`（自托管）里构建；`ci.yml` 的 `build-hap` 仍 `if: false` | `CI` 不能替代分支上的本机构建；PR 合入前必须有人在 DevEco 里真构建过 | 让每次 push 都编 HAP 是**有意的非目标**；若要，放开 `build-hap` 的 `if` |
-| **发布流水线从未在 GitHub 上真实运行过** | 每个零件都已在本机验证（见第 8 节），但"tag → runner → Release"整链未跑 | 首次打 tag 时可能暴露 YAML/runner 配置问题 | 注册 runner 后打一个 `v*-rc.1` |
+| **发布流水线从未在 GitHub 上真实运行过** | ✅ **已解除**（2026-10-11）：tag `v0.1.0` 一次跑通标签 → 门禁 → 自托管构建 → 发布，Release 已上线，下载后校验和一致 | 首次运行暴露并修掉了 3 个接线缺陷（`pwsh` 不存在、`DEVECO_HOME` 未跨 step 传递、`java` 不在 PATH 上），见 `TODO.md` §7.2b | — |
+| **runner 是手动进程** | `run.cmd` 不是 Windows 服务（装服务需管理员权限） | **机器重启后需要重新拉起 runner**，否则 tag 发布会在"等 runner"上挂着 | 需要时以管理员身份 `svc.cmd install` + `svc.cmd start` |
 | **`libcore.so` 不在任何流水线里** | 交叉编译需要 OHOS NDK，且当前被 `socklen_t` 冲突挡住（`TODO.md` §1.1） | 产出的 HAP **不含可用内核** | 解决 `TODO.md` §1.1 之后 |
 | **不跑 `ohosTest`** | 无设备、无模拟器 | 只能靠本机实测；PR 模板里有"未做实机验证"勾选项要求如实标注 | 有真机或模拟器后 |
 | **静态检查未进 CI** | DevEco Code Linter（`code-linter.json5`）需要在 DevEco 内运行 | ArkTS 规则只能靠本机跑；`repo-hygiene` 查不到 ArkTS 问题 | 找到可在命令行调用 codelinter 的方式后（**待确认**：DevEco 的 codelinter CLI 接口未在本机验证） |

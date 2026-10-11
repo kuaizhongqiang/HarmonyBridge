@@ -475,24 +475,61 @@ push tag v*  →  verify（托管 runner：仓库卫生 + 配置 + 不跑 cgo �
 **发布语义的唯一定义处是 `scripts/release-metadata.json`**（tag 形态、产物名、路径、
 构建参数），workflow / 本地脚本 / changelog 三者都读它，避免三套规则漂移。
 
-### 7.2 ❌ 没有任何 self-hosted runner
+### 7.2 ✅ self-hosted runner 已注册并跑通（2026-10-11）
 
-`publish` job 的 `runs-on: [self-hosted, harmonyos, windows]` 是**默认不存在的标签**。
-所以在注册 runner 之前，**打 tag 会红在"等 runner"上，而不是发一个空 Release**
-——这是有意为之（宁可红得震耳欲聋，也不要绿得毫无意义）。注册步骤见
-`docs/design/ci.md` §4。
+`publish` job 的 `runs-on: [self-hosted, harmonyos, windows]` 现在有真实的 runner：
+
+| 项 | 值 |
+| --- | --- |
+| 名称 | `DESKTOP-J1B0B8S-harmonybridge` |
+| 安装位置 | `C:\actions-runner-harmonybridge`（**不在仓库内**） |
+| 标签 | `self-hosted` `Windows` `X64` `harmonyos`（`self-hosted`/`Windows`/`X64` 自动打，只手工加了 `harmonyos`） |
+| 启动方式 | **手动**：`C:\actions-runner-harmonybridge\run.cmd`。**没有装成 Windows 服务**（装服务要管理员权限），所以**机器重启后需要重新运行它** |
+| 自动更新 | 未配置（`--disableupdate` 未加，但手动运行时按需处理） |
+
+**一次真实的发布已经跑通**：tag `v0.1.0` → 门禁 → 变更日志 → 自托管构建 → 发布。
+Release: <https://github.com/kuaizhongqiang/HarmonyBridge/releases/tag/v0.1.0>，
+资产 `harmonybridge-0.1.0-unsigned.hap`（1,877,668 字节）与 `SHA256SUMS.txt`，
+下载后**校验和与记录一致**。
+
+### 7.2b ⚠️ 首次跑通暴露了 3 个我自己的接线缺陷（都已修）
+
+这三个都**只能在真实运行时暴露** —— 本机逐件测试时全部漏掉了，值得记下来：
+
+1. **`shell: pwsh` 在自托管 runner 上不存在**。`pwsh` 是 PowerShell 7+，
+   GitHub 托管镜像自带，但普通 Windows 机器只有 5.1。报错是
+   `##[error]pwsh: command not found`。已全部改为 `shell: powershell`
+   （脚本本来就同时兼容 5.1/7）。**这是"本机跑过等价命令"≠"那个步骤会通过"的典型**。
+2. **`DEVECO_HOME` 解析出来了却没传给下一步**。每个 step 是新进程，
+   preflight 在默认路径下验证通过后，下一步拿到 `$null` →
+   `Join-Path : Cannot bind argument to parameter 'Path'`。已改为写 `GITHUB_ENV`。
+3. **`java` 必须在 `PATH` 上，不只是 `JAVA_HOME`**。只设 `JAVA_HOME` 时
+   `assembleHap` 在 `PackageHap` 报 `Error Code: 00308018 Unknown Error` ——
+   这条消息**完全不提 Java**（`docs/03-环境搭建.md` 早就记录了它就是
+   `spawn java ENOENT`）。已改为把 `<jbr>\bin` 写进 `GITHUB_PATH`。
+
+> **为什么本机没发现**：本机的开发者 shell **本来就有 java 在 PATH 上**，
+> 而且我手动跑构建时也是这样。这就是"本地全绿"最容易骗人的地方。
+
+### 7.2c ⚠️ 变更日志的"上一个 tag"曾经算错
+
+第一版把**被发布的那个 tag 自己**当成了"上一个 tag"（它指向待发布提交，
+从 HEAD 可达），于是把**本次要发布的提交又列了一遍**。已改为用
+`git describe --tags --abbrev=0 --exclude=<当前tag> <当前tag>^`，
+并**用一次模拟的第二次发布验证过**（结果只含新提交那一条）。
 
 ### 7.3 ⚠️ 产物是**未签名** HAP —— 这是决定，不是遗漏
 
 按"仅自用、不对外发行"的既定决策与"签名材料不入库"的纪律，流水线**不签名**：
 发布 `harmonybridge-<version>-unsigned.hap` + `SHA256SUMS.txt`，
 并在 release notes 里写清如何自行签名/侧载。
+`release.yml` 里有一条**反向断言**：如果产出的是已签名 HAP，直接失败。
 
-### 7.4 ⚠️ 发布流水线**从未真实运行过**
+### 7.4 ✅ 发布流水线**已经真实运行过**（原 ❓ 已解除）
 
-本机只验证了它的**每个零件**：`changelog.mjs`（含版本不一致/非法 tag 的失败路径）、
-`release-preflight.ps1`、`release-local.ps1 -SkipBuild`（真产出 HAP + SHA256SUMS 并核对）、
-以及 workflow YAML 的结构合法性。**"GitHub 上跑起来"仍是 ❓**（需要 runner + 真 tag）。
+本机逐件验证 + GitHub 上一次完整运行（见 §7.2）。剩下的长期项只有：
+runner 是**手动运行的进程**（重启后需重新拉起），以及 `libcore.so` 仍未产出
+（所以 HAP 里没有可用内核，见 §1.1）。
 
 ### 7.5 ⚠️ workflow YAML 没有自动化校验
 
