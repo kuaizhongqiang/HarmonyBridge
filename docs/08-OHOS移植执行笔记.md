@@ -26,6 +26,22 @@
 
 **剩下没验的**：真机运行（无设备，见 `TODO.md` §1.2）、完整 `go test` 套件、Linux 机器复核。
 
+### 0.1 这一轮实测用的确切环境（复现请对齐）
+
+| 项 | 值 |
+| --- | --- |
+| 宿主 | Windows（amd64） |
+| 基线 | 上游 `go1.26.5` tag = `c19862e5` |
+| bootstrap Go | 官方 **go1.26.4** windows/amd64（`GOROOT_BOOTSTRAP`） |
+| OHOS NDK | DevEco 自带 `sdk/default/openharmony/native`，**clang 15.0.4**（`llvm-project 00dcd9cd`），sysroot `aarch64-linux-ohos` |
+| NDK 路径 | 经 **junction** 映射到 `C:\ohndk`（**必须无空格**，否则 Go 会截断 `CC`） |
+| cgo 目标 | `--target=aarch64-linux-ohos --sysroot=<ndk>/sysroot -fuse-ld=lld` |
+| 构建缓存 | **全新 `GOCACHE`**（见 §5 坑 5） |
+
+> ⚠️ 上一轮文档里"本机是 Windows，编不出工具链"的结论**已被推翻**：
+> Windows 完全能编，只要有 bootstrap Go；**OHOS NDK 的 clang 也是 Windows 原生可执行文件**
+> （所以连交叉编译都不需要 Linux）。这是本轮能"在 Windows 上跑完全部验收"的原因。
+
 ---
 
 ## 1. 这一轮真的做出来了什么
