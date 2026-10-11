@@ -21,6 +21,12 @@
 #   first is how a `main.go` compile error once reached `main`: the whole cgo
 #   package is excluded under `//go:build cgo`, so the failure is invisible.
 #   Neither configuration produces `libcore.so` -- that needs the OHOS NDK.
+#
+#   Shell note: Windows steps use `shell: powershell` (Windows PowerShell 5.1),
+#   NOT `shell: pwsh` (PowerShell 7+). Hosted images ship pwsh, but a plain
+#   self-hosted Windows runner does not, and `pwsh: command not found` killed
+#   the first real release run before it did any work. Every script in this
+#   repository is written to run on 5.1 and 7 alike.
 # ---------------------------------------------------------------------------
 name: Verify
 
@@ -67,7 +73,7 @@ jobs:
           submodules: false
 
       - name: Repository hygiene gate
-        shell: pwsh
+        shell: powershell
         run: ./scripts/verify-repo.ps1
 
   # -------------------------------------------------------------------------
@@ -230,7 +236,7 @@ jobs:
           submodules: false
 
       - name: install-hooks sets core.hooksPath
-        shell: pwsh
+        shell: powershell
         run: |
           ./scripts/install-hooks.ps1
           $hooksPath = git config --get core.hooksPath
@@ -241,7 +247,7 @@ jobs:
           Write-Host "core.hooksPath = $hooksPath"
 
       - name: check-env runs and reports (missing SDK must not fail the job)
-        shell: pwsh
+        shell: powershell
         run: |
           # check-env.ps1 is expected to FAIL on a GitHub runner: there is no
           # DevEco Studio and no OHOS SDK here. The point of this step is that

@@ -28,6 +28,14 @@
 #   and says so in the release notes, rather than inventing a signing story.
 #   `scripts/release-metadata.json` is the single source of truth for these
 #   names and paths; this workflow reads the ones it needs from it.
+#
+# WHY `shell: powershell` AND NOT `shell: pwsh`
+#   `pwsh` means PowerShell 7+, which GitHub's HOSTED images ship but a plain
+#   self-hosted Windows box usually does not. On the first real tag run this
+#   job died with `##[error]pwsh: command not found` before doing anything.
+#   `powershell` is Windows PowerShell 5.1, present on every Windows machine,
+#   and every script here is written to run on both. If you are adding a step
+#   that genuinely needs 7+, install pwsh on the runner AND say so here.
 # ---------------------------------------------------------------------------
 name: Release
 
@@ -210,7 +218,7 @@ jobs:
           submodules: false
 
       - name: Preflight -- refuse to continue without a real toolchain
-        shell: pwsh
+        shell: powershell
         run: ./scripts/release-preflight.ps1 -RequireDeveco
 
       - name: Download the generated release notes
@@ -220,14 +228,14 @@ jobs:
           path: .
 
       - name: Install ohpm dependencies
-        shell: pwsh
+        shell: powershell
         run: |
           $ohpm = Join-Path $env:DEVECO_HOME 'tools\ohpm\bin\ohpm.bat'
           & $ohpm install
           if ($LASTEXITCODE -ne 0) { throw "ohpm install failed with exit code $LASTEXITCODE" }
 
       - name: Assemble the unsigned HAP
-        shell: pwsh
+        shell: powershell
         run: |
           # Clean first: an incremental task can report UP-TO-DATE and prove
           # nothing about the code being released (docs/03-环境搭建.md 5.2).
@@ -246,7 +254,7 @@ jobs:
           if ($code -ne 0) { throw "assembleHap failed with exit code $code" }
 
       - name: Expect an unsigned HAP and nothing else
-        shell: pwsh
+        shell: powershell
         run: |
           # Read the metadata as UTF-8 explicitly. Windows PowerShell 5.1 (what a
           # self-hosted Windows runner runs) defaults to the ANSI code page, which
@@ -287,7 +295,7 @@ jobs:
 
       - name: Stage the release assets
         id: stage
-        shell: pwsh
+        shell: powershell
         run: |
           $meta = [System.IO.File]::ReadAllText(
             (Join-Path $env:GITHUB_WORKSPACE 'scripts/release-metadata.json'),
@@ -329,7 +337,7 @@ jobs:
           echo "hapName=$hapName" >> $env:GITHUB_OUTPUT
 
       - name: Publish the GitHub Release
-        shell: pwsh
+        shell: powershell
         run: |
           # Kept last: if anything above failed, no release exists at all.
           # A release with no artifact is worse than no release.

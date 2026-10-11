@@ -133,7 +133,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Report that this job is not provisioned yet
-        shell: pwsh
+        shell: powershell
         run: |
           Write-Host '::error::build-hap is intentionally disabled.'
           Write-Host 'A self-hosted runner with DevEco Studio + SDK is required.'
