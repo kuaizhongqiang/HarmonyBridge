@@ -1,0 +1,255 @@
+# ---------------------------------------------------------------------------
+# Reusable verification gates for HarmonyBridge.
+#
+# WHY THIS FILE EXISTS
+#   A tag push and a branch push must be judged by *the same* rules. If
+#   release.yml repeated ci.yml's steps, the two would drift and a release
+#   could ship something a PR would have been failed for. Instead both call
+#   this workflow, so there is exactly one definition of "verified".
+#
+# WHAT CAN AND CANNOT RUN HERE
+#   Everything in this file is deliberately SDK-free: git, Node and Go only.
+#   The HarmonyOS toolchain (DevEco Studio, hvigorw, the SDK, signing material)
+#   does not exist on GitHub-hosted runners, so nothing here claims to build a
+#   HAP. The HAP is built on a self-hosted runner -- see release.yml.
+#
+#   Go note: the core is an Xray-core c-shared library. The `go` job below runs
+#   the service layer in BOTH configurations, because the repository has two:
+#   `CGO_ENABLED=0` covers the pure-Go half (what a developer machine without a
+#   C compiler gets), and `CGO_ENABLED=1` additionally compiles `main.go` and
+#   runs `main_test.go`, which guards the service catalogue. Running only the
+#   first is how a `main.go` compile error once reached `main`: the whole cgo
+#   package is excluded under `//go:build cgo`, so the failure is invisible.
+#   Neither configuration produces `libcore.so` -- that needs the OHOS NDK.
+# ---------------------------------------------------------------------------
+name: Verify
+
+on:
+  workflow_call:
+    inputs:
+      repo_hygiene:
+        description: 'Run the repository hygiene gate (verify-repo.ps1).'
+        type: boolean
+        default: true
+      verify_bootstrap:
+        description: 'Also run install-hooks + bootstrap to prove onboarding still works.'
+        type: boolean
+        default: false
+      cgo:
+        description: >-
+          Compile and test the cgo package (main.go / main_test.go). Default true.
+          The release path may pass false so that a cgo-only failure does not block
+          a release whose real gates are the repo/manifest checks -- see ci.md 5.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # The tracked-file gate: forbidden artifacts, credential-looking strings,
+  # submodule integrity. Windows because scripts/verify-repo.ps1 is the
+  # authoritative implementation and windows-latest ships pwsh 7.
+  # -------------------------------------------------------------------------
+  repo-hygiene:
+    name: repo hygiene
+    if: ${{ inputs.repo_hygiene }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # verify-repo.ps1 reads the index (ls-files -s, grep --cached), not
+          # history, so a shallow checkout is enough.
+          fetch-depth: 1
+          submodules: false
+
+      - name: Repository hygiene gate
+        shell: pwsh
+        run: ./scripts/verify-repo.ps1
+
+  # -------------------------------------------------------------------------
+  # Manifest syntax plus cross-file sanity. Pure Node standard library: no
+  # network, no install step.
+  # -------------------------------------------------------------------------
+  manifests:
+    name: manifest syntax + sanity
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Show the Node version
+        run: node --version
+
+      - name: Validate JSON/JSON5 manifests
+        run: node scripts/validate-json5.mjs
+
+  # -------------------------------------------------------------------------
+  # The Go service layer. This is the only part of the native core that can be
+  # compiled without the OHOS NDK, so it is the only part CI can guard.
+  # -------------------------------------------------------------------------
+  go:
+    name: go build / vet / test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      # CGO_ENABLED=1 plus the default `cc` on ubuntu-latest. No OHOS NDK here:
+      # this compiles for the host and never claims to produce libcore.so.
+      # The caller can turn the cgo half off with `cgo: false`; see the input docs.
+      CGO_ENABLED: ${{ inputs.cgo && '1' || '0' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: entry/src/main/golang/go.mod
+          cache-dependency-path: entry/src/main/golang/go.sum
+
+      - name: Show the toolchain (and prove cgo is really on)
+        if: ${{ inputs.cgo }}
+        working-directory: entry/src/main/golang
+        run: |
+          go version
+          cc --version | head -n1
+          # Fail loudly if cgo is unavailable rather than silently degrading to
+          # CGO_ENABLED=0 and skipping the interesting package.
+          if [[ "$(go env CGO_ENABLED)" != "1" ]]; then
+            echo "::error::CGO_ENABLED is $(go env CGO_ENABLED); the cgo package would be skipped"
+            exit 1
+          fi
+
+      - name: gofmt (must be clean)
+        working-directory: entry/src/main/golang
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "${unformatted}" ]]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: Pure-Go configuration (CGO_ENABLED=0)
+        working-directory: entry/src/main/golang
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          # This is what a developer machine without a C compiler gets. It does
+          # NOT cover main.go / main_test.go: they carry `//go:build cgo`.
+          go build ./...
+          go vet ./...
+          go test ./... -count=1
+
+      - name: Prove the cgo package compiles (the silent-skip guard)
+        if: ${{ inputs.cgo }}
+        working-directory: entry/src/main/golang
+        run: |
+          # WHAT THIS GUARDS
+          # `main.go` and `main_test.go` carry `//go:build cgo`. If cgo is not
+          # active they are dropped from the build set entirely, and then
+          # `go build ./...` / `go test ./...` still SUCCEED while checking
+          # nothing. That is how a committed compile error in main.go and a
+          # missing route in main_test.go both survived (TODO.md section 4.1).
+          #
+          # So this step must be independent of `go build ./...`. `go test
+          # -run '^$'` compiles the test binary and runs no tests: it fails if
+          # main.go or main_test.go does not compile, and it proves both were
+          # in the build set.
+          #
+          # TWO TRAPS, both found by actually running this:
+          #  1. `.GoFiles` is EMPTY for this package. With cgo active these files
+          #     are reported under `.CgoFiles`, and `_test.go` under
+          #     `.TestGoFiles`.
+          #  2. Do NOT use `go list -f '{{join .GoFiles "\n"}}'`: Go's
+          #     text/template has no `\n` escape in string literals, so that form
+          #     dies with `template: main:1: unexpected "\\" in operand` -- the
+          #     guard would break on its very first run.
+          echo "cgo file lists:"
+          go list -f '  CgoFiles={{.CgoFiles}} TestGoFiles={{.TestGoFiles}}' .
+
+          echo "compiling the test binary (no tests executed):"
+          go test . -run '^$' -count=1
+          echo "OK: main.go and main_test.go both compile, so cgo is genuinely active."
+
+      - name: cgo configuration -- service-catalogue guard (CGO_ENABLED=1)
+        if: ${{ inputs.cgo }}
+        working-directory: entry/src/main/golang
+        run: |
+          go build ./...
+          go vet ./...
+          # main_test.go asserts the registered service catalogue matches
+          # expectedRoutes exactly: a route can never be added or renamed without
+          # a deliberate edit to the golden list in the frozen contract.
+          go test . -count=1 -v
+
+      - name: All Go packages (cgo on)
+        if: ${{ inputs.cgo }}
+        working-directory: entry/src/main/golang
+        run: go test ./... -count=1
+
+      - name: Explain what this job still does not cover
+        run: |
+          {
+            echo "### Go gate scope"
+            echo ""
+            echo "| configuration | what it proves |"
+            echo "| --- | --- |"
+            echo "| \`CGO_ENABLED=0\` | the pure-Go service layer builds and tests without a C compiler |"
+            echo "| \`CGO_ENABLED=1\` | \`main.go\` type-checks and \`main_test.go\` guards the service catalogue |"
+            echo ""
+            echo "**Not covered:** the \`libcore.so\` cross-compile (\`GOOS=android\` + OHOS NDK)."
+            echo "That needs the NDK and is documented as blocked in \`TODO.md\` section 1.1;"
+            echo "nothing here claims a working \`.so\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # -------------------------------------------------------------------------
+  # Onboarding regression. Opt-in, because a fresh clone + submodule fetch is
+  # slow and is not something every push should pay for.
+  # -------------------------------------------------------------------------
+  bootstrap:
+    name: install-hooks + bootstrap
+    if: ${{ inputs.verify_bootstrap }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: install-hooks sets core.hooksPath
+        shell: pwsh
+        run: |
+          ./scripts/install-hooks.ps1
+          $hooksPath = git config --get core.hooksPath
+          if ($hooksPath -ne '.githooks') {
+            Write-Host "::error::core.hooksPath is '$hooksPath', expected '.githooks'"
+            exit 1
+          }
+          Write-Host "core.hooksPath = $hooksPath"
+
+      - name: check-env runs and reports (missing SDK must not fail the job)
+        shell: pwsh
+        run: |
+          # check-env.ps1 is expected to FAIL on a GitHub runner: there is no
+          # DevEco Studio and no OHOS SDK here. The point of this step is that
+          # it fails *diagnostically* rather than crashing on a syntax error.
+          $output = & ./scripts/check-env.ps1 2>&1 | Out-String
+          Write-Host $output
+          if ($output -match 'ParserError|not recognized as the name of a cmdlet') {
+            Write-Host '::error::check-env.ps1 did not run as a script (syntax or cmdlet error)'
+            exit 1
+          }
+          Write-Host 'check-env.ps1 executed and produced a report.'

@@ -1,22 +1,33 @@
 # ---------------------------------------------------------------------------
-# HarmonyBridge release scaffold (tag-triggered).
+# HarmonyBridge release: tag -> verify -> build -> publish.
 #
-# THIS WORKFLOW DOES NOT PRODUCE A RELEASE YET, and it is written so that it
-# cannot pretend to. Every step that needs a real HarmonyOS toolchain is marked
-# `# TODO(setup):` and the job fails fast with an explicit message rather than
-# succeeding on an empty artifact set.
+# THE FLOW
+#   1. push a `vX.Y.Z` tag
+#   2. `verify`    (ubuntu/windows, hosted)  re-runs the *same* SDK-free gates
+#                                            CI runs. A tag cannot buy a release
+#                                            that a branch push would have failed.
+#   3. `changelog` (ubuntu, hosted)          validates tag <-> AppScope version,
+#                                            generates RELEASE_NOTES.md from
+#                                            Conventional Commits, and uploads it
+#                                            as an artifact.
+#   4. `publish`   (self-hosted windows)     assembleHap -> SHA256SUMS.txt ->
+#                                            `gh release create` with the assets.
 #
-# What is already real: the trigger, the version derivation from the tag, the
-# validation that the tag agrees with AppScope/app.json5, the permission set,
-# the checksum/publication structure, and the failure path.
+# WHY THE BUILD NEEDS A SELF-HOSTED RUNNER
+#   hvigorw + the HarmonyOS SDK only exist inside a DevEco Studio install.
+#   GitHub-hosted runners have none of it. Registering this machine as a
+#   runner with labels [self-hosted, harmonyos, windows] is the activation
+#   step; docs/design/ci.md section 4 covers it. Because the label does not
+#   exist by default, a tag push without a runner FAILS LOUDLY instead of
+#   publishing an empty release.
 #
-# What is deferred, and why -- see docs/design/ci.md ("发布流程"):
-#   * building an unsigned HAP requires hvigorw from a DevEco Studio install
-#   * signing requires hap-sign-tool.jar plus a .p12 keystore, a .cer and a
-#     .p7b profile with their passwords, none of which may live in this
-#     repository
-#   * GitHub-hosted runners have none of the above, so the signing job targets
-#     a self-hosted runner label that does not exist until it is provisioned
+# WHY THE RELEASE IS UNSIGNED (deliberate, see docs/design/ci.md section 5)
+#   Signing needs a .p12 keystore, a .cer and a .p7b profile plus passwords.
+#   This project's rules forbid committing those, and the artefacts are for
+#   self-use only. So the pipeline publishes `harmonybridge-<version>-unsigned.hap`
+#   and says so in the release notes, rather than inventing a signing story.
+#   `scripts/release-metadata.json` is the single source of truth for these
+#   names and paths; this workflow reads the ones it needs from it.
 # ---------------------------------------------------------------------------
 name: Release
 
@@ -24,17 +35,16 @@ on:
   push:
     tags:
       - 'v*'
-  # Dry-run entry point: validates the tag/app-version agreement and then stops,
-  # so the parts that ARE implemented can be exercised today.
+  # Dry run: derive + validate everything and generate the notes, but stop
+  # before touching a runner or creating a release. This is how the parts that
+  # CAN be exercised on a hosted runner get exercised today.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: '只校验版本号与变更说明，不构建、不签名、不发布'
+        description: '只校验版本号、跑门禁、生成变更日志；不构建、不发布'
         type: boolean
         default: true
 
-# Least privilege; the release job widens `contents` to write only when it
-# actually publishes.
 permissions:
   contents: read
 
@@ -44,19 +54,40 @@ concurrency:
 
 jobs:
   # -------------------------------------------------------------------------
-  # Version resolution + manifest agreement. Runs anywhere, no SDK needed.
+  # Same rules as CI. A tag is not an exemption.
   # -------------------------------------------------------------------------
-  prepare:
-    name: resolve and validate the release version
+  verify:
+    name: verify
+    uses: ./.github/workflows/verify.yml
+    with:
+      repo_hygiene: true
+      verify_bootstrap: false
+      # The release path does NOT gate on the cgo package. Rationale: a cgo-only
+      # compile error (or a missing `cc` on a runner) must not decide whether an
+      # APK-adjacent artifact gets published; that is what branch CI is for, and
+      # it runs on every push with cgo ON. The gates that DO block a release are
+      # repo hygiene, manifest validity and tag/version agreement.
+      # Do not read this as "cgo failures are acceptable": main must be green.
+      cgo: false
+
+  # -------------------------------------------------------------------------
+  # Version resolution + release notes. No SDK, no runner labels: this job is
+  # fully exercisable on a hosted runner, including via workflow_dispatch.
+  # -------------------------------------------------------------------------
+  changelog:
+    name: resolve version + generate release notes
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
-      app_version: ${{ steps.version.outputs.app_version }}
+      tag: ${{ steps.version.outputs.tag }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          # Release notes need the commit history between two tags.
           fetch-depth: 0
           submodules: false
 
@@ -66,161 +97,269 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            raw="${GITHUB_REF_NAME}"
+            tag="${GITHUB_REF_NAME}"
           else
-            # workflow_dispatch has no tag; fall back to the app manifest so the
-            # dry run still exercises the comparison.
-            raw=""
+            # workflow_dispatch has no tag. Fall back to the manifest so the dry
+            # run still exercises the whole path.
+            tag="v$(node -e '
+              const fs = require("node:fs");
+              const m = fs.readFileSync("AppScope/app.json5", "utf8").match(/"versionName"\s*:\s*"([^"]+)"/);
+              if (!m) process.exit(1);
+              process.stdout.write(m[1]);
+            ')"
           fi
-          tag_version="${raw#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
-          app_version="$(node -e '
+          version="$(node -e '
             const fs = require("node:fs");
-            const text = fs.readFileSync("AppScope/app.json5", "utf8");
-            const m = text.match(/"versionName"\s*:\s*"([^"]+)"/);
+            const m = fs.readFileSync("AppScope/app.json5", "utf8").match(/"versionName"\s*:\s*"([^"]+)"/);
             if (!m) { console.error("versionName not found in AppScope/app.json5"); process.exit(1); }
             process.stdout.write(m[1]);
           ')"
-          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-          if [[ -z "${tag_version}" ]]; then
-            echo "::notice::No tag (workflow_dispatch); using the app manifest version ${app_version}."
-            echo "version=${app_version}" >> "$GITHUB_OUTPUT"
-            exit 0
+          node scripts/changelog.mjs --tag "${tag}" --validate-only
+          echo "::notice::${tag} agrees with AppScope/app.json5 versionName=${version}."
+
+          # Previous tag reachable from this commit, best-effort: absent for the
+          # very first release, which changelog.mjs handles.
+          previous="$(git tag --list 'v*' --sort=-v:refname | grep -v "^${tag}$" | head -n1 || true)"
+          echo "previous_tag=${previous}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${previous}" ]]; then
+            echo "::notice::previous tag is ${previous}"
+          else
+            echo "::notice::no previous tag: this is the first release."
           fi
 
-          if ! [[ "${tag_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Tag '${raw}' is not v<semver>. Expected e.g. v1.2.3."
-            exit 1
-          fi
-
-          if [[ "${tag_version}" != "${app_version}" ]]; then
-            echo "::error::Tag ${raw} says ${tag_version} but AppScope/app.json5 versionName is ${app_version}. Bump the manifest before tagging."
-            exit 1
-          fi
-
-          echo "version=${tag_version}" >> "$GITHUB_OUTPUT"
-          echo "::notice::Version ${tag_version} agrees with AppScope/app.json5."
-
-      - name: Confirm the manifests still parse
-        run: node scripts/validate-json5.mjs
-
-  # -------------------------------------------------------------------------
-  # Dry run: everything cheap, then stop. This is what workflow_dispatch does.
-  # -------------------------------------------------------------------------
-  dry-run:
-    name: dry run (no build, no signing)
-    needs: prepare
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 1
-          submodules: false
-
-      - name: Repository hygiene gate
-        run: bash scripts/verify-repo.sh
+      - name: Generate RELEASE_NOTES.md
+        shell: bash
+        run: |
+          node scripts/changelog.mjs \
+            --tag '${{ steps.version.outputs.tag }}' \
+            --output RELEASE_NOTES.md
 
       - name: Summarise
         run: |
           {
-            echo "## Release dry run"
+            echo "## Release dry run / changelog"
             echo ""
             echo "| item | value |"
             echo "| --- | --- |"
-            echo "| resolved version | \`${{ needs.prepare.outputs.version }}\` |"
-            echo "| AppScope versionName | \`${{ needs.prepare.outputs.app_version }}\` |"
-            echo "| build | **not attempted** (needs DevEco Studio) |"
-            echo "| signing | **not attempted** (needs hap-sign-tool.jar + key material) |"
-            echo "| publish | **not attempted** |"
+            echo "| tag | \`${{ steps.version.outputs.tag }}\` |"
+            echo "| previous tag | \`${{ steps.version.outputs.previous_tag }}\` |"
+            echo "| manifest versionName | \`${{ steps.version.outputs.version }}\` |"
+            echo "| HAP build | **not attempted here** -- self-hosted \`publish\` job |"
+            echo "| signed | **no**, by design (unsigned HAP + SHA256SUMS) |"
             echo ""
-            echo "Push a \`v*\` tag to reach the real pipeline; see docs/design/ci.md."
+            echo "### Generated notes (preview)"
+            echo ""
+            cat RELEASE_NOTES.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the notes for the publish job
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # Dry run stops here: everything that can be proven on a hosted runner has
+  # been proven, and nothing has been published.
+  # -------------------------------------------------------------------------
+  dry-run:
+    name: dry run complete
+    needs: changelog
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: State plainly what did not happen
+        run: |
+          {
+            echo "## Dry run: nothing was built or published"
+            echo ""
+            echo "- HAP build: **not attempted** (needs DevEco Studio on a self-hosted runner)"
+            echo "- Release: **not created**"
+            echo "- Tag validated: \`${{ needs.changelog.outputs.tag }}\`"
+            echo ""
+            echo "Push a \`v*\` tag to reach the real pipeline."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # -------------------------------------------------------------------------
-  # The real thing. Guarded on a self-hosted runner label that does not exist
-  # by default, so a tag push fails loudly instead of publishing nothing.
+  # The real thing. Runs on the machine that has DevEco Studio. Guarded on a
+  # self-hosted label that does not exist until it is provisioned, so a tag
+  # push fails loudly rather than publishing nothing.
   # -------------------------------------------------------------------------
-  release:
-    name: build, sign and publish (self-hosted)
-    needs: prepare
+  publish:
+    name: build + publish (self-hosted)
+    needs: changelog
     if: github.event_name == 'push'
     runs-on: [self-hosted, harmonyos, windows]
-    timeout-minutes: 120
+    timeout-minutes: 90
     permissions:
       contents: write
+    env:
+      # Prefixes every gh command; harmless for the rest of the steps.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          # The submodule reference is read-only and irrelevant to the build;
-          # skipping it also avoids needing credentials for it.
           fetch-depth: 0
           submodules: false
 
       - name: Preflight -- refuse to continue without a real toolchain
         shell: pwsh
+        run: ./scripts/release-preflight.ps1 -RequireDeveco
+
+      - name: Download the generated release notes
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: .
+
+      - name: Install ohpm dependencies
+        shell: pwsh
         run: |
-          # TODO(setup): this step is intentionally a hard stop until a
-          # self-hosted runner is provisioned. It fails with an actionable
-          # message instead of letting later steps "succeed" with no artifact.
-          $problems = @()
-          if ([string]::IsNullOrWhiteSpace($env:DEVECO_HOME) -and -not (Test-Path 'D:\Harmony\DevEco Studio')) {
-            $problems += 'DevEco Studio not found (set $env:DEVECO_HOME)'
+          $ohpm = Join-Path $env:DEVECO_HOME 'tools\ohpm\bin\ohpm.bat'
+          & $ohpm install
+          if ($LASTEXITCODE -ne 0) { throw "ohpm install failed with exit code $LASTEXITCODE" }
+
+      - name: Assemble the unsigned HAP
+        shell: pwsh
+        run: |
+          # Clean first: an incremental task can report UP-TO-DATE and prove
+          # nothing about the code being released (docs/03-环境搭建.md 5.2).
+          $hvigor = Join-Path $env:DEVECO_HOME 'tools\hvigor\bin\hvigorw.bat'
+          & $hvigor clean --no-daemon
+          if ($LASTEXITCODE -ne 0) { throw "hvigor clean failed with exit code $LASTEXITCODE" }
+
+          $log = Join-Path $env:TEMP 'release-assemble.log'
+          cmd /c "`"$hvigor`" --mode module -p product=default -p buildMode=release assembleHap --no-daemon > `"$log`" 2>&1"
+          $code = $LASTEXITCODE
+          # Do not pipe hvigor output through PowerShell: it truncates lines and
+          # destroys "file:line:col" (docs/03-环境搭建.md 5.2). Strip ANSI only.
+          ((Get-Content $log -Raw) -replace "\x1b\[[0-9;]*m", '') -split "`r?`n" |
+            Where-Object { $_ -match 'BUILD|ERROR|Error Message|Finished :entry:default@CompileArkTS' } |
+            ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "assembleHap failed with exit code $code" }
+
+      - name: Expect an unsigned HAP and nothing else
+        shell: pwsh
+        run: |
+          # Read the metadata as UTF-8 explicitly. Windows PowerShell 5.1 (what a
+          # self-hosted Windows runner runs) defaults to the ANSI code page, which
+          # garbles the Chinese strings in this file and makes ConvertFrom-Json fail.
+          $meta = [System.IO.File]::ReadAllText(
+            (Join-Path $env:GITHUB_WORKSPACE 'scripts/release-metadata.json'),
+            [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+          $hap = Join-Path $env:GITHUB_WORKSPACE $meta.paths.unsignedHap
+          if (-not (Test-Path $hap)) {
+            # Fall back to a search rather than guessing: the exact output path is
+            # a hvigor convention, not a contract we control. Root the search at
+            # the first segment of the configured path (`entry`) so it cannot
+            # wander off into the rest of the workspace.
+            $searchRoot = Join-Path $env:GITHUB_WORKSPACE ($meta.paths.hapSearchGlob -split '/' | Select-Object -First 1)
+            Write-Host "expected HAP not at $($meta.paths.unsignedHap); searching $searchRoot"
+            $found = @(Get-ChildItem -Recurse -Path $searchRoot -Filter *.hap -ErrorAction SilentlyContinue)
+            if ($found.Count -eq 0) {
+              Write-Host '::error::assembleHap succeeded but produced no .hap file'
+              exit 1
+            }
+            if ($found.Count -gt 1) {
+              Write-Host '::error::more than one .hap found; refusing to guess which one to release'
+              $found | ForEach-Object { Write-Host "  $($_.FullName)" }
+              exit 1
+            }
+            $hap = $found[0].FullName
           }
-          if ([string]::IsNullOrWhiteSpace($env:HB_SIGN_KEYSTORE)) {
-            $problems += 'signing keystore not provided ($env:HB_SIGN_KEYSTORE)'
-          }
-          if ([string]::IsNullOrWhiteSpace($env:HB_SIGN_PROFILE)) {
-            $problems += 'provisioning profile not provided ($env:HB_SIGN_PROFILE)'
-          }
-          if ($problems.Count -gt 0) {
-            foreach ($p in $problems) { Write-Host "::error::$p" }
-            Write-Host 'See docs/design/ci.md -> "发布流程" for what a runner needs.'
+          $size = (Get-Item $hap).Length
+          if ($size -le 0) { Write-Host '::error::the HAP is empty'; exit 1 }
+          Write-Host "unsigned HAP: $hap ($size bytes)"
+          # The documented release policy is unsigned-only (docs/design/ci.md 5.3).
+          # If a signed HAP ever shows up, the policy changed somewhere without
+          # this workflow being updated -- fail rather than ship that silently.
+          if ($hap -notmatch 'unsigned') {
+            Write-Host "::error::this build looks SIGNED ($hap); the release policy is unsigned-only (docs/design/ci.md 5.3)"
             exit 1
           }
-          Write-Host '::error::release is a scaffold: the build, sign and publish steps below are TODO(setup).'
-          exit 1
 
-      # TODO(setup): build the native proxy core. Belongs to the native
-      # workstream; the script below is theirs, not this workflow's.
-      # - name: Build the native proxy core
-      #   shell: pwsh
-      #   run: ./scripts/build-core.ps1
+      - name: Stage the release assets
+        id: stage
+        shell: pwsh
+        run: |
+          $meta = [System.IO.File]::ReadAllText(
+            (Join-Path $env:GITHUB_WORKSPACE 'scripts/release-metadata.json'),
+            [System.Text.Encoding]::UTF8) | ConvertFrom-Json
 
-      # TODO(setup): assemble the UNSIGNED HAP.
-      # - name: Assemble the unsigned HAP
-      #   shell: pwsh
-      #   run: |
-      #     & "$env:DEVECO_HOME\tools\hvigor\bin\hvigorw.bat" `
-      #         --mode module -p product=default -p buildMode=release assembleHap --no-daemon
-      #   # Expected output: entry/build/default/outputs/default/entry-default-unsigned.hap
+          # Derive the version from the manifest rather than crossing jobs with
+          # `needs.changelog.outputs`: the validate step already proved that the
+          # tag and this manifest agree, and each `shell: pwsh` step is a fresh
+          # process, so keeping the value local removes a whole class of
+          # "expression not available in this job" surprises.
+          $manifest = [System.IO.File]::ReadAllText(
+            (Join-Path $env:GITHUB_WORKSPACE $meta.version.manifest),
+            [System.Text.Encoding]::UTF8)
+          $version = ([regex]::Match($manifest, '"versionName"\s*:\s*"([^"]+)"')).Groups[1].Value
+          if ([string]::IsNullOrWhiteSpace($version)) { throw 'could not read versionName from the manifest' }
 
-      # TODO(setup): sign with hap-sign-tool.jar (SDK toolchains/lib) using the
-      # keystore/profile supplied through runner secrets, never committed.
-      # - name: Sign the HAP
-      #   shell: pwsh
-      #   run: |
-      #     & "$env:JAVA_HOME\bin\java.exe" -jar "$env:SDK_HOME\toolchains\lib\hap-sign-tool.jar" sign-app `
-      #         -mode localSign -keyAlias $env:HB_SIGN_ALIAS `
-      #         -keyPwd $env:HB_SIGN_KEY_PWD -keystorePwd $env:HB_SIGN_STORE_PWD `
-      #         -appCertFile $env:HB_SIGN_CERT -profileFile $env:HB_SIGN_PROFILE `
-      #         -inFile <unsigned.hap> -outFile <signed.hap> -signAlg SHA256withECDSA
+          $hap = Join-Path $env:GITHUB_WORKSPACE $meta.paths.unsignedHap
+          if (-not (Test-Path $hap)) { throw "unsigned HAP vanished before staging: $hap" }
 
-      # TODO(setup): generate SHA-256 checksums for the signed artifacts.
-      # - name: Generate checksums
-      #   shell: pwsh
-      #   run: Get-FileHash -Algorithm SHA256 <signed.hap> | ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } | Set-Content SHA256SUMS.txt
+          $staging = Join-Path $env:RUNNER_TEMP 'release-assets'
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
-      # TODO(setup): publish. Kept last so a partial failure never produces a
-      # release with no artifact.
-      # - name: Create the GitHub Release
-      #   uses: softprops/action-gh-release@v3
-      #   with:
-      #     files: |
-      #       <signed.hap>
-      #       SHA256SUMS.txt
-      #     generate_release_notes: true
+          $hapName = $meta.artifacts.releaseHapNameTemplate.Replace('{version}', $version)
+          $hapTarget = Join-Path $staging $hapName
+          Copy-Item $hap $hapTarget -Force
+
+          # SHA-256 of the shipped file, in the canonical `sha256sum` format.
+          $hash = (Get-FileHash -Algorithm SHA256 $hapTarget).Hash.ToLower()
+          "$hash  $hapName" | Set-Content -Path (Join-Path $staging $meta.artifacts.checksumsName) -Encoding ascii
+
+          Write-Host "version: $version"
+          Write-Host 'staged assets:'
+          Get-ChildItem $staging | ForEach-Object { Write-Host "  $($_.Name)" }
+
+          # Step outputs, not GITHUB_ENV: each `shell: pwsh` step is a fresh
+          # process, and an env var written by a previous step is not reliably
+          # visible to the next one.
+          echo "staging=$staging" >> $env:GITHUB_OUTPUT
+          echo "hapName=$hapName" >> $env:GITHUB_OUTPUT
+
+      - name: Publish the GitHub Release
+        shell: pwsh
+        run: |
+          # Kept last: if anything above failed, no release exists at all.
+          # A release with no artifact is worse than no release.
+          $meta = [System.IO.File]::ReadAllText(
+            (Join-Path $env:GITHUB_WORKSPACE 'scripts/release-metadata.json'),
+            [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+          $tag = '${{ needs.changelog.outputs.tag }}'
+          $notes = Join-Path $env:GITHUB_WORKSPACE $meta.artifacts.releaseNotesName
+          if (-not (Test-Path $notes)) { throw "release notes missing at $notes" }
+
+          $prerelease = @()
+          if ($tag -match '-') { $prerelease = @('--prerelease') }
+
+          gh release create $tag `
+            --title "$tag" `
+            --notes-file $notes `
+            @prerelease `
+            (Join-Path '${{ steps.stage.outputs.staging }}' '${{ steps.stage.outputs.hapName }}') `
+            (Join-Path '${{ steps.stage.outputs.staging }}' $meta.artifacts.checksumsName)
+
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed with exit code $LASTEXITCODE" }
+          Write-Host "::notice::published $tag"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Release ${{ needs.changelog.outputs.tag }}"
+            echo ""
+            echo "- unsigned HAP: \`${{ steps.stage.outputs.hapName }}\`"
+            echo "- checksums: \`SHA256SUMS.txt\`"
+            echo "- signing: **not performed** by design (see docs/design/ci.md section 5)"
+          } >> "$GITHUB_STEP_SUMMARY"

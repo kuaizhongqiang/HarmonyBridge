@@ -1,13 +1,20 @@
 # ---------------------------------------------------------------------------
-# Release-notes categorisation for GitHub's auto-generated notes
-# (`.github/release.yml` is read by "Generate release notes" and by
-# softprops/action-gh-release when `generate_release_notes: true`).
+# Release-notes categorisation for GitHub's auto-generated notes.
 #
-# Categories are matched against PR LABELS, not commit types: GitHub's
-# generator only sees labels. The label names below therefore mirror the
-# Conventional Commit types used in this repository (see CONTRIBUTING.md), and
-# .github/labeler-style automation is not configured -- a maintainer applies
-# them, or the `dependencies` label that Dependabot sets automatically.
+# ⚠️ THIS FILE IS NOT WHAT PRODUCES THE RELEASE NOTES ANY MORE.
+# The release pipeline generates `RELEASE_NOTES.md` with
+# `scripts/changelog.mjs`, which reads the COMMIT LOG. This repository commits
+# directly to `main` (no PR per change), so GitHub's generator -- which
+# categorises by PULL-REQUEST LABEL and can only list PRs -- would emit an
+# essentially empty changelog. See docs/design/ci.md section 5.
+#
+# This file is kept deliberately:
+#   * it is what the GitHub UI's "Generate release notes" button uses when a
+#     maintainer drafts a release by hand;
+#   * it stays correct for the moment changes start arriving through PRs.
+# Keep the label names below mirroring the Conventional Commit types (see
+# CONTRIBUTING.md). No labeler automation is configured: a maintainer applies
+# them, or Dependabot sets `dependencies` automatically.
 #
 # Schema reference: https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
 # ---------------------------------------------------------------------------
