@@ -50,32 +50,83 @@
 **没有**落进 `docs/design/core.md` §6.3 记录的"bionic 固定槽 + 外来线程调 cgo
 概率性 SIGSEGV"那条路。交付用的正是 §6.3 的 **B 路线（fork + `GOOS=openharmony`）**。
 
-### 0.1.1 ❌ 交付**不完整**（缺件，需补齐）
+### 0.1.1 ✅ 报告已到（并**更正我此前的一个误判**）
 
-`harmonybridge-so/SHA256SUMS.txt` 与 `README.txt` 引用了 **7 个文件**，实际只有 **2 个**：
+执行报告：[`docs/05-Linux构建执行报告-20261011.md`](docs/05-Linux构建执行报告-20261011.md)
+（356 行，Ubuntu 22.04.5 **原生 Linux**，基准 commit `c7810cd`）。
 
-| 缺失 | 影响 |
-| --- | --- |
-| `05-Linux构建执行报告-20261011.md` | ❌ **README 明确指向它，但不存在** —— 任务书 §9 要求的那份报告是核心交付物 |
-| `libcore-A-route.so` | ❌ 无法独立复验"A 路线产物**没有 TLS 段**"这个关键对照结论 |
-| `libhevsocks5tun-3sibling-variant.so` + `siblings-3sibling-variant/` 三个 `.so` | ❌ 备选数据面方案缺件 |
+> 🔧 **更正**：我此前写"交付不完整、缺 A 路线产物与 3sibling 变体"——**那是我读错了范围**。
+> `harmonybridge-so/` 里放的本来就是**推荐组合**（自包含的两个 `.so`）；
+> A 路线那个 33 MB 的对照产物与 3sibling 变体**留在 Linux 机器的**
+> `/home/kuai/opt/hb-runs/` 与 `/home/kuai/opt/hb-delivery/`，**没有往仓库搬**。
+> 而 **A 路线的对照数据已完整写进报告**（原样粘贴的 `readelf -l/-r` 输出），
+> 所以"无法独立复验 A 路线无 TLS 段"这一点，靠报告里的原始输出已经足够。
 
-> ⚠️ 已验收的 2 个文件本身是**好的**；缺的是**对照产物与报告**。
-> 因此"A 路线无 TLS 段"这条**目前只有交付方的一面之词**（❓ 未独立证实）。
+**报告的核心数据（A vs B 的 TLS 对比 —— 任务书 §6.3 要的就是这份）：**
 
-### 0.1.2 ⚠️ 仍然**没有真机验证**（这一条没有因为拿到 `.so` 而改变）
+| | A 路线（官方 Go，`GOOS=android`） | B 路线（fork，`GOOS=openharmony`） |
+| --- | --- | --- |
+| 干预次数 | **3 处** hack | **0 处** |
+| `PT_TLS` 段 | **无** | **有**（0x10 字节） |
+| TLS 重定位 | **无** | **1 条 `R_AARCH64_TLSDESC`** |
+| 大小 | 33.0 MB | 34.5 MB |
 
-交付方自己在 README 里写明：两个 `.so` **只做了静态验收**，
-**没有在真机上跑过**。所以以下依然是 ❓：
+**Lead 补做的一步（报告未做）**：检查 B 产物的未定义符号，确认它**不引用**
+`__get_tls` / `__stack_chk_guard` 等 bionic 专用机制 —— 它走的是**标准 ELF TLS**
+（`PT_TLS` + `TLSDESC`，musl 支持）。A 产物两者皆空：既没有自己的 TLS 镜像，
+也不是标准 ELF TLS 形态。
 
-- 在真机上 `dlopen` 是否成功、`GoInvoke` 是否可调；
-- **外来线程（VPN 扩展进程）调 cgo 是否真的不 SIGSEGV** ——
-  `tlsModel = "GD"` 是**工具链层面**的证据，**不是运行期证据**；
+> ⚠️ **仍然只是工具链级证据**。`TLSDESC` 说明"没掉进 bionic 固定槽假设"，
+> **不等于**真机上外来线程调 cgo 一定不崩。**真机验证依然必需。**
+
+### 0.1.2 🆕 报告新查出的两个缺陷（任务书**没有**提到）
+
+**（a）A 路线其实有第三个障碍：链接期 `-llog`**
+
+```text
+ld.lld: error: unable to find library -llog
+```
+
+根因（✅ 已核实）：官方 Go 的 **android/arm64 端口在链接期无条件追加 `-llog`**
+（bionic 的 liblog），而 OHOS sysroot 没有 liblog、只有 `libhilog_ndk.z`。
+**加 `-lhilog_ndk.z` 不能替代** —— 那个 `-llog` 是 Go 链接器自己加的，不受 `CGO_LDFLAGS` 控制。
+绕过办法是造一个 **0 成员的空 `liblog.a`** 让它被解析到。
+
+**（b）`scripts/build-tun2socks.sh` 的产物不是自包含的**（⚠️ **真机 `dlopen` 会失败**）
+
+Lead 已复核脚本源码：`:106` 只有 `cp -f "${BUILT_SO}" ...`，**只复制主库**。
+而上游 `make shared` 会把三个第三方库编成**独立 .so** 并写进 `DT_NEEDED`：
+
+```text
+NEEDED: libyaml.so / liblwip.so / libhev-task-system.so / libc.so
+```
+
+→ **三个 dlsym 符号都在，但真机上库加载不起来**（找不到那三个兄弟库）。
+报告已实做一版**自包含替代品**（`make tp-static` + 手工重链三个 `.a`，
+286,736 B，`NEEDED` 只剩 `libc.so`）—— **仓库里交付的就是它**。
+
+> ❌ **不要直接把 `build-tun2socks.sh` 的产物丢进 HAP**，除非同时把三个兄弟 `.so`
+> 也放进去（它们在原 Linux 机器的 `siblings-3sibling-variant/`）。
+> 👉 建议把这条**写进脚本头部注释**，否则下一个人还会踩（见 §7.6）。
+
+### 0.1.3 ⚠️ 一条容易被忽略的语义差异：两条路线的 `GOOS` 不是一回事
+
+B 路线用的是**独立 GOOS `openharmony`**，所以 xray-core 里 `//go:build linux` 的文件
+**不会被选中**（A 路线选中的是 android 后端）。本次**没有**编译错误，
+但两条路线的**运行期行为不完全可比**：构建期 `GOOS=openharmony`，
+而 fork 的 `zgoos_openharmony.go` 里 `const GOOS = "linux"`。❓ 真机行为未验证。
+
+### 0.1.4 ⚠️ 仍然**没有真机验证**（拿到 `.so` 不改变这一条）
+
+交付方在报告里写明：两个 `.so` **只做了静态验收**。以下依然是 ❓：
+
+- 真机 `dlopen` 是否成功、`GoInvoke` 是否可调；
+- **外来线程（VPN 扩展进程）调 cgo 是否真的不 SIGSEGV**；
 - hev 能否处理 OHOS 的 vNIC fd（U3，见 §6.1）。
 
-### 0.1.3 ⚠️ 怎么把它们放进 HAP —— **尚未接线**
+### 0.1.5 ⚠️ 怎么把它们放进 HAP —— **仍未接线**
 
-`entry/libs/arm64-v8a/` 现在**只有 `.gitkeep`**。要让它进 HAP，需要：
+`entry/libs/arm64-v8a/` 现在**只有 `.gitkeep`**。要让它们进 HAP：
 
 ```powershell
 copy harmonybridge-so\libcore.so         entry\libs\arm64-v8a\
@@ -83,25 +134,61 @@ copy harmonybridge-so\libhevsocks5tun.so entry\libs\arm64-v8a\
 ```
 
 - ✅ `entry/libs/**/*.so` 已被 `.gitignore` 挡住（**产物不入库**，正确）；
-  但根下的 `harmonybridge-so/` **不在** ignore 规则内 —— 它只靠 `verify-repo.ps1`
-  的 `*.so` 规则兜住，**不要 `git add` 它**。
+  `/harmonybridge-so/` 也已加入 ignore（防 `git add -A` 误装 33 MB）。
 - ⚠️ **发布流水线的 HAP 里不会有这两个 `.so`**：CI 从 git 检出后构建，而这俩不入库。
-  这是"预编译产物怎么交给 CI"的**待决策项**（对象存储 / Release 资产回填 /
-  runner 上预置），不是执行者该默默决定的事。
-- ⚠️ 3sibling 变体若要用，必须**连三个 sibling 一起**放进 HAP，否则真机 `dlopen` 会失败。
+  见 §7.6。
+- ⚠️ 交付方**刻意没有替你选 A/B**，也**没有**把 `.so` 放进 `entry/libs/`
+  （理由："不想用'文件已经在那儿了'来替负责人默认选一条"）—— 这个判断是对的。
 
 ---
 
+### 0.2 🔨 工具链路线已决策：**自己做 OHOS Go 移植，不用第三方 fork**
 
-### 1.1 ❌ B2：Go → OHOS 工具链 —— 内核 `libcore.so` 编不出来
+**决策（2026-10-11，项目负责人）**：
+1. ❌ **不使用** `star4277/ohos-go` 作为生产工具链；
+2. ✅ 走**路线 1**：**以官方 OpenHarmony SIG 的移植为基线，自己维护 + 跟上游 rebase**；
+3. ✅ 参考实现**只读**：可以读它的 diff 搞清"要改什么"，**代码自己重写**。
 
-**位置**：`scripts/build-core.ps1` 头部注释
+**任务书**：[`docs/06-OHOS-Go工具链自研任务书.md`](docs/06-OHOS-Go工具链自研任务书.md)
 
-**现象**：Windows 宿主上交叉编译 `libcore.so` 失败。根因不是"缺参数"，而是
-Go 标准库里的 `socklen_t` 与 OHOS musl 的 `typedef unsigned socklen_t` 宽度不一致，
+**Lead 已完成的侦察（免得下一个人重复调研）**：
+
+| 事实 | 值 |
+| --- | --- |
+| 上游 Go 有 openharmony 吗 | **没有**（master 的 `syslist.go`/`dist/build.go`/`supported.go` 全是 0 次）→ 任何方案都是 fork |
+| 官方 SIG 仓库 | `gitcode.com/openharmony-sig/ohos_golang_go`，**BSD-3-Clause**，git 可直接 clone 🧪 |
+| 移植在哪条分支 | `release-branch.go1.24`（`VERSION=go1.24.5`，2025-07-02） |
+| ⚠️ `release-branch.go1.26` | 存在，但**里面 openharmony 出现 0 次** —— 那条还没移植 |
+| 官方 tag | `go1.24.5.ohosv1r1` |
+| **移植真实规模** | **+1985 / -512**（关于 openharmony 的部分，~131 文件）；另有 **36 个与移植无关**的文件（+777/-167）**不要照搬** |
+
+**开工前必须先定的"Go 版本鸿沟"**：SIG 移植停在 **go1.24.5**，而我们的 xray-core 要求 **go1.26**。
+🧪 已核实：**可见范围内没有任何 xray 版本要求 ≤ go1.24**（最老的可见版要 go1.25）。
+所以只有两条路 —— **1A：把移植往前搬到 go1.26**（推荐）；
+**1B：降 xray-core**（代价大，但要先花 10 分钟验证"xray 是否真的用到 go1.26 语法"）。
+详见任务书 §2。
+
+---
+
+### 1.1 ✅ B2 已解除：内核 `libcore.so` **已编出**（2026-10-11，B 路线）
+
+> **状态变更**：这一条从"硬阻塞"降级为**已解决** —— 但请先读 §0.1 与 §0.1.4：
+> **没有真机验证**，所以"编出来"≠"能用"。
+
+**原现象**（留档）：Windows 宿主上交叉编译失败。根因不是"缺参数"，而是 Go 标准库里的
+`socklen_t` 与 OHOS musl 的 `typedef unsigned socklen_t` 宽度不一致，
 **必须给 Go 打补丁**，不是加编译选项能解决的。
 
-**为什么挡住目标**：没有 `libcore.so` 就没有内核 → 没有本地 SOCKS 入站 → 没有分流。
+**最终怎么解的**：走 **B 路线** —— 换 `GOOS=openharmony` 的 Go fork
+（`star4277/ohos-go` `v1.26.5-beta1`），**一次编过、零干预**：
+目标不再是 android，于是 `socklen_t` 与 `android/log.h` 两个障碍自然消失。
+完整报告见 [`docs/05-Linux构建执行报告-20261011.md`](docs/05-Linux构建执行报告-20261011.md)。
+
+**仍然 ❓ 的**：真机行为；以及**是否接受个人 fork 作为工具链**（供应链决策，见 §0.1.1）。
+A 路线（官方 Go）也能编出，但要 **3 处 hack**（shim + stdlib 补丁 + 空 `liblog.a`），
+且产物 `PT_TLS` 段与 TLS 重定位**都是空的** —— 见 §0.1.1 的对比表。
+
+**为什么曾经挡住目标**：没有 `libcore.so` 就没有内核 → 没有本地 SOCKS 入站 → 没有分流。
 
 **怎么解**：在 Linux / WSL 上构建（脚本已按这条路写）。
 
