@@ -16,11 +16,11 @@ ArkTS  →  libbridge.so (NAPI C++)  →  libcore.so (Go, c-shared)  →  Xray-c
 | `ipc/` | 服务注册表 + JSON 信封编解码（`Group.Method` 路由） |
 | `app/app.go` | 汇总导入：所有服务 + 特性注册表 |
 | `registry.go` | 空白导入 Xray 的代理/传输/特性包，保证二进制功能完整 |
-| `service/core/` | `CoreService.Start / Stop / Status` —— 内核生命周期 |
+| `service/core/` | `CoreService.Start / Stop / Status / RuntimeInfo` —— 内核生命周期与本地入站端口 |
 | `service/config/` | `ConfigService.Generate` —— 节点 JSON -> `config.json`（生成后立即用 Xray 自己的 loader 自检；返回文本，落盘由 ArkTS 侧的 `ConfigStore` 完成） |
 | `service/version/` | `VersionService.GetVersion` —— 报告 Xray-core 版本 |
 | `service/log/` | 环形缓冲日志 + `LogService.Tail / Clear` |
-| `service/ping/` | `PingService.Tcping` —— TCP 连接延迟测试 |
+| `service/ping/` | `PingService.Tcping`（TCP 连接延迟测试）+ `PingService.SpeedTest`（本阶段是**明确的桩**：`speedBps` 恒为 0，不伪造测量值） |
 | `service/validator/` | `ValidatorService.ValidateConfig` —— 用 Xray 自己的管线校验配置 |
 | `assert/` | 供 C 边界使用的 panic-on-error 小工具 |
 
@@ -35,18 +35,27 @@ ArkTS  →  libbridge.so (NAPI C++)  →  libcore.so (Go, c-shared)  →  Xray-c
 
 | 服务名 | 参数 | 结果 |
 | --- | --- | --- |
-| `CoreService.Start` | `{fd:int, assetLocation:string, configLocation:string, start:bool}` | `{started, configLoaded, configBytes, wired, fd, version, notes[]}` |
+| `CoreService.Start` | `{fd?:int(reserved), assetLocation:string, configLocation:string, socksPort?:int, httpPort?:int, start:bool}` | `{started, configLoaded, configBytes, wired, socksPort, httpPort, version, notes[]}` |
 | `CoreService.Stop` | `{}` | `{stopped:bool}` |
-| `CoreService.Status` | `{}` | `{running, version, fd, lastError?}` |
+| `CoreService.Status` | `{}` | `{running, version, lastError?}` |
+| `CoreService.RuntimeInfo` | `{}` | `{socksPort, httpPort, configLocation?, note?}` |
 | `VersionService.GetVersion` | `{}` | `{version, semver, bridge, go}` |
 | `LogService.Tail` | `{limit:int}` | `{lines:[string], count:int}` |
 | `LogService.Clear` | `{}` | `{cleared:int}` |
-| `PingService.Tcping` | `{host:string, port:int, timeoutMs?:int}` | `{delayMs, reachable, address, ip, resolveMs, error?}` |
+| `PingService.Tcping` | `{host:string, port:int, timeoutMs?:int}` | `{latencyMs, reachable, address, ip, resolveMs, error?}` |
+| `PingService.SpeedTest` | `{}` | `{speedBps, notes[]}`（`speedBps` 恒为 0 = 未测量） |
 | `ValidatorService.ValidateConfig` | `{config?:string, configLocation?:string, configPath?:string}` | `{valid, errors[], inboundTags[], outboundTags[]}` |
 
-> `CoreService.Start` 默认只做**校验不启动**（`start` 缺省为 `false`）。原因见
-> `docs/design/core.md` 的 “tun fd handoff” 一节：OHOS 上还没有把 tun 文件描述符
-> 交给 Xray 的可用实现，贸然启动只会得到一个没有任何可用入站的进程。
+> `CoreService.Start` 默认只做**校验不启动**（`start` 缺省为 `false`）。
+>
+> **数据面契约**（`docs/design/ipc-contract.md` §2）：vNIC fd **不交给内核**，链路是
+> `tun → tun2socks → 本地 SOCKS/HTTP 入站 → Xray 出站`，内核只拥有本地入站。
+> 因此 `fd` 是**保留字段、当前未使用**（传了也只会出现在 `notes` 里），
+> `socksPort` / `httpPort` 缺省回落到 `service/config` 的
+> `DefaultSocksPort`(10808) / `DefaultHTTPPort`(10809)。
+> `wired` 的语义是「本地 SOCKS/HTTP 入站已监听、出站可路由」——**本阶段没有任何东西真的在监听，
+> 所以 `wired` 恒为 `false`**；`notes` 每次都把这一点说明白。
+> `PingService.SpeedTest` 同理：结果里的 0 表示"没测"，不是"测出来是 0 bit/s"。
 
 ## 主机侧自检（不需要 NDK）
 
@@ -58,7 +67,7 @@ export GOFLAGS=-mod=mod
 go build ./...
 go vet ./...
 gofmt -l .          # 应输出为空
-go test ./...       # 会拉起完整 Xray 内核，验证服务目录确实注册成功
+go test ./...       # 不依赖 cgo 也能跑：见下方「主机侧测试」一节
 ```
 
 `main.go` 带 `//go:build cgo` 标签，因此 `CGO_ENABLED=0` 的环境也能编译其余部分。
@@ -70,8 +79,7 @@ go test ./...       # 会拉起完整 Xray 内核，验证服务目录确实注�
 > * `CGO_ENABLED=0` 时 `go build ./...` 正常工作，但根包不会出现在
 >   `go list ./...` 里，`go test .` 会报
 >   `build constraints exclude all Go files`；
-> * 要真正执行根包测试（**强烈建议在 CI 里跑**，它会加载整个 Xray 特性注册表，
->   是「服务目录有没有接上」的唯一自动验证），需要
+> * 要真正执行根包测试，需要
 >   `CGO_ENABLED=1` **且本机有一个能生成本机可执行文件的 C 编译器**
 >   （Linux 上是 gcc/clang；Windows 上需要 MinGW-w64 或 MSVC）。
 >
@@ -79,8 +87,15 @@ go test ./...       # 会拉起完整 Xray 内核，验证服务目录确实注�
 > **无法**代替：它是交叉编译器，既没有 MSVC 头，也没有 MinGW 的
 > Windows 目标支持（实测 `#include <stdio.h>` 即失败），因此不能用来构建
 > 本机的 cgo 测试二进制。这种情况下请改用 WSL 或 Linux CI 跑根包测试。
->
-> `ipc` 包（`ipc_test.go`）**不依赖 cgo**，在任何环境下都会正常执行。
+
+### 主机侧测试（不依赖 cgo，也无真机）
+
+| 测试 | 位置 | 覆盖 |
+| --- | --- | --- |
+| 服务目录黄金列表 | `service/core/core_test.go` | 空白导入 `app` 后比对 `ipc.Default.Names()` 与契约 §4 的 11 项（含字典序）——`main_test.go` 的 cgo 版本在同一台**没有 C 编译器**的机器上跑不了，这份是它的无 cgo 替身 |
+| `CoreService.*` | `service/core/core_test.go` | RuntimeInfo 未启动/已 Stop 的取值；Status 不含 `fd`；Start 诊断路径（`started=false`、`wired=false`、端口默认/给定、非法端口回落、`notes` 说明） |
+| `PingService.*` | `service/ping/ping_test.go` | 在真实 `127.0.0.1` 监听上验证 Tcping 成功路径；参数校验；SpeedTest 不伪造测量值；`latencyMs`/`socksPort`/`httpPort` 等字段名防漂移 |
+| 信封与路由 | `ipc/ipc_test.go` | 服务名拆分、未知服务、非法 JSON |
 
 ## 交叉编译到 OHOS（aarch64-linux-ohos）
 

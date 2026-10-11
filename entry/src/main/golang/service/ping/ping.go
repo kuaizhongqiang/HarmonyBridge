@@ -7,6 +7,10 @@
 // answers "can this device open a TCP connection to this address, and how
 // fast". Routing a probe through a live Xray outbound is a separate,
 // instance-dependent feature (see docs/design/core.md, "unresolved").
+//
+// The package also implements PingService.SpeedTest, which is a stub that
+// deliberately refuses to produce a number: a real measurement needs a live,
+// fully wired core on the device, and this build has neither. See SpeedTest.
 package ping
 
 import (
@@ -51,10 +55,12 @@ type Request struct {
 
 // Response is the payload returned by PingService.Tcping.
 type Response struct {
-	// DelayMs is the measured round trip to a completed TCP handshake.
-	DelayMs int64 `json:"delayMs"`
+	// LatencyMs is the measured round trip to a completed TCP handshake. The
+	// field used to be called delayMs; it was renamed to match the frozen
+	// contract (docs/design/ipc-contract.md section 5.3).
+	LatencyMs int64 `json:"latencyMs"`
 
-	// Reachable is false when the probe failed; DelayMs is then -1.
+	// Reachable is false when the probe failed; LatencyMs is then -1.
 	Reachable bool `json:"reachable"`
 
 	// Address is the resolved host:port that was dialled.
@@ -100,7 +106,7 @@ func (s *Service) Tcping(req *Request) (*Response, error) {
 		addrs, err := net.DefaultResolver.LookupHost(context.Background(), req.Host)
 		if err != nil || len(addrs) == 0 {
 			return &Response{
-				DelayMs:   -1,
+				LatencyMs: -1,
 				Reachable: false,
 				Address:   net.JoinHostPort(req.Host, strconv.Itoa(req.Port)),
 				Error:     "dns: " + errString(err, "no addresses returned"),
@@ -136,7 +142,7 @@ func (s *Service) Tcping(req *Request) (*Response, error) {
 		_ = conn.Close()
 
 		return &Response{
-			DelayMs:   elapsed.Milliseconds(),
+			LatencyMs: elapsed.Milliseconds(),
 			Reachable: true,
 			Address:   dialAddr,
 			IP:        candidate,
@@ -145,12 +151,45 @@ func (s *Service) Tcping(req *Request) (*Response, error) {
 	}
 
 	return &Response{
-		DelayMs:   -1,
+		LatencyMs: -1,
 		Reachable: false,
 		Address:   address,
 		IP:        ip,
 		ResolveMs: resolveMs,
 		Error:     errString(nil, lastErr),
+	}, nil
+}
+
+// SpeedTestRequest is the parameter object for PingService.SpeedTest. It is
+// empty but kept as a struct so the wire format stays uniform.
+type SpeedTestRequest struct{}
+
+// SpeedTestResponse is the payload returned by PingService.SpeedTest.
+type SpeedTestResponse struct {
+	// SpeedBps is the measured throughput in bits per second. It is ALWAYS 0 in
+	// this build: 0 means "not measured", it does NOT mean "0 bit/s". The
+	// frozen contract forbids filling in a fake number (section 4.1), so a
+	// caller must read Notes before showing anything to a user.
+	SpeedBps int64 `json:"speedBps"`
+
+	// Notes explains why no measurement was taken. Never empty.
+	Notes []string `json:"notes"`
+}
+
+// SpeedTest implements PingService.SpeedTest.
+//
+// It is a stub on purpose. A real throughput measurement has to push bytes
+// through a live core with a working inbound on a real device; neither exists
+// yet (local SOCKS/HTTP inbounds are not listening and there is no tun2socks),
+// so the only honest answer is "unknown" - never a made-up rate. The contract
+// spells this out: 不得伪造测量值 (docs/design/ipc-contract.md section 4.1).
+func (s *Service) SpeedTest(_ *SpeedTestRequest) (*SpeedTestResponse, error) {
+	return &SpeedTestResponse{
+		SpeedBps: 0,
+		Notes: []string{
+			"测速需要在真机上跑一个活的、本地入站已监听的 Xray 实例；本阶段未实现，" +
+				"因此 speedBps 恒为 0（0 = 未测量，不是 0 bit/s）",
+		},
 	}, nil
 }
 
@@ -173,5 +212,12 @@ func init() {
 			return nil, err
 		}
 		return svc.Tcping(&req)
+	})
+	ipc.Register("PingService.SpeedTest", func(params json.RawMessage) (any, error) {
+		var req SpeedTestRequest
+		if err := ipc.DecodeParams(params, &req); err != nil {
+			return nil, err
+		}
+		return svc.SpeedTest(&req)
 	})
 }

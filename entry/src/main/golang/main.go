@@ -73,7 +73,8 @@ func GoInvoke(service, parameters *C.char) (result *C.char) {
 
 	name := C.GoString(service)
 
-	// A nil parameter pointer is the same as "no arguments".	params := "{}"
+	// A nil parameter pointer is the same as "no arguments".
+	params := "{}"
 	if parameters != nil {
 		if s := C.GoString(parameters); s != "" {
 			params = s
@@ -90,6 +91,18 @@ func invoke(service, paramsJSON string) string {
 	// but doing it here keeps the message identical to the pure-Go path.
 	if _, _, err := ipc.SplitService(service); err != nil {
 		return mustEnvelope(ipc.Fail(err))
+	}
+
+	// An empty parameters string means "no arguments", not "bad JSON". This has
+	// to be normalised HERE, not only in the cgo wrapper: GoInvoke maps a nil or
+	// empty *C.char to "{}" already, so handling it there alone made the C entry
+	// point and this function disagree about the same input - something the
+	// contract (docs/design/ipc-contract.md 3.3: the return value is always
+	// valid JSON and the caller may omit parameters) requires them to agree on.
+	// A whitespace-only string needs no special case: the json.Valid check below
+	// rejects it exactly like any other non-JSON payload.
+	if paramsJSON == "" {
+		paramsJSON = "{}"
 	}
 
 	// Guard against a parameters string that is not JSON at all; ipc.Invoke

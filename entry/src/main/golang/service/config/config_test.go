@@ -269,14 +269,23 @@ func TestGeneratedConfigAcceptedByCoreLoader(t *testing.T) {
 			text, notes := mustMarshal(t, n, "rule")
 			mustLoad(t, text)
 
-			// tun 入站必须在配置里，否则 CoreService.Start 拿到的是一份
-			// 没有任何可用入站的配置（这正是当前 "Wired=false" 的根源之一）。
-			if !strings.Contains(text, `"protocol": "tun"`) {
-				t.Errorf("生成的配置里没有 tun 入站")
+			// 配置里**绝不能**有 tun 入站：数据面是「TUN -> tun2socks -> 本地 SOCKS」，
+			// 内核对 tun 一无所知（裁决见 docs/design/ipc-contract.md §2）。
+			//
+			// 这不是"多余"而是**有害**：本版内核的 proxy/tun 在 xray.tun.fd 缺省时
+			// 读到的是 "0"，会把 stdin 当成 TUN 交给 gVisor —— 重则
+			// instance.Start() 直接失败，分流一起挂掉。
+			if strings.Contains(text, `"protocol": "tun"`) {
+				t.Errorf("生成的配置里出现了 tun 入站，内核启动时会去读 xray.tun.fd（默认 0=stdin）:\n%s", text)
 			}
-			// 本地 socks/http 入站也要在（用于非 VPN 场景与联调）
+			// 本地 socks/http 入站必须在（它们才是真正的数据面入口）
 			if !strings.Contains(text, `"tag": "socks-in"`) || !strings.Contains(text, `"tag": "http-in"`) {
 				t.Errorf("生成的配置缺少 socks-in / http-in 入站")
+			}
+			// 嗅探必须挂在 socks 入站上，否则 geosite:cn 这类「按域名分流」规则
+			// 拿不到域名，只能退化成按 IP 匹配（geoip:cn），"绕过大陆"会漏一片。
+			if !strings.Contains(text, `"sniffing"`) {
+				t.Errorf("生成的配置里没有 sniffing，按域名分流（geosite:cn）会失效")
 			}
 			// proxy 必须是 outbounds[0]：Xray 用第一个出站作为默认出站
 			if !strings.Contains(text, `"tag": "proxy"`) {

@@ -30,12 +30,6 @@ import (
 const (
 	DefaultSocksPort = 10808
 	DefaultHTTPPort  = 10809
-
-	// tun 入站的网卡名与 MTU。fd 不在这里配置：它由 CoreService.Start 通过
-	// xray.tun.fd 环境变量传给 proxy/tun（见 infra/conf/tun.go 与
-	// proxy/tun/tun_android.go）。
-	TunName    = "xray0"
-	DefaultMTU = 1500
 )
 
 // 出站 tag。顺序即 Xray 的默认出站优先级（outbounds[0] 为默认）。
@@ -416,14 +410,24 @@ func Build(node *Node, opts Options) (*Config, []string, error) {
 	cfg := &Config{
 		Log: &LogConfig{LogLevel: logLevel},
 		DNS: buildDNS(opts, &notes),
+		// Inbounds 里**没有 tun**：数据面是「TUN -> tun2socks -> 本地 SOCKS」，
+		// 内核对 tun 一无所知（裁决见 docs/design/ipc-contract.md §2）。
+		//
+		// 刻意不生成 tun 入站，因为本版内核的 proxy/tun 在 android 端口下会去读
+		// xray.tun.fd，**缺省值是 "0"**（proxy/tun/tun_android.go），于是 fd 0
+		// （stdin）会被当成 TUN 链路交给 gVisor —— 轻则日志指向错误，重则
+		// instance.Start() 直接失败，把"分流"一起拖下水。
+		//
+		// 嗅探挂在 socks 入站上（而不是原先的 tun 入站）：tun2socks 交给 SOCKS 的
+		// 多半是 IP，只有在入站侧嗅探 TLS SNI / HTTP Host 才能拿到域名，
+		// geosite:cn 这类按域名分流的规则才不会退化成只看 IP。
 		Inbounds: []Inbound{
 			{
-				Tag:      "tun-in",
-				Protocol: "tun",
-				Settings: map[string]any{
-					"name": TunName,
-					"MTU":  DefaultMTU,
-				},
+				Tag:      "socks-in",
+				Protocol: "socks",
+				Listen:   "127.0.0.1",
+				Port:     socksPort,
+				Settings: map[string]any{"udp": true, "auth": "noauth"},
 				Sniffing: &SniffingConfig{
 					Enabled: true,
 					// destOverride 只能写 http / tls / quic / fakedns
@@ -432,18 +436,10 @@ func Build(node *Node, opts Options) (*Config, []string, error) {
 					// 见 app/dispatcher/sniffer.go:39-44 与 blacklistRules 的说明。
 					DestOverride: []string{"http", "tls"},
 					// routeOnly=true：嗅探出的域名**只用于路由匹配**，不改写实际目的地。
-					// 对齐 v2rayN 对 TUN 入站的处理（V2rayInboundService.cs:90）。
 					// 这对"按域名分流"是关键：否则嗅探会改写目标域名，
 					// 让 geosite:cn 命中的后果扩散到连接本身。
 					RouteOnly: true,
 				},
-			},
-			{
-				Tag:      "socks-in",
-				Protocol: "socks",
-				Listen:   "127.0.0.1",
-				Port:     socksPort,
-				Settings: map[string]any{"udp": true, "auth": "noauth"},
 			},
 			{
 				Tag:      "http-in",
