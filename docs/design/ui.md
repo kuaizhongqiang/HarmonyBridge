@@ -326,6 +326,12 @@ export const CoreAvailable: () => string;
   REALITY 站点是不同出站，不应被合并）；新增 `transport == grpc && serviceName 为空` 的校验项。
 
 生成配置链路：`ConnectionViewModel.connect()` 把 `nodeToJsonText(node)`（`model/ServerNode.ets` 的
-`NodeJson` 显式结构）作为 `ConfigService.Generate` 的 `extra` 参数发送。该参数的**内容**是本次
-新增的约定，原生侧实现前需确认 —— 已登记在
-[`ipc-contract.md`](ipc-contract.md) §5 待收敛清单。
+`NodeJson` 显式结构）作为 `ConfigService.Generate` 的 `extra` 参数发送；返回的 `configJson`
+由 `core/ConfigStore.ets` 落盘到 `<filesDir>/core/config.json`，路径再交给 `CoreService.Start`。
+该参数的**内容已冻结并实现** —— 原生侧见 `entry/src/main/golang/service/config/`，
+两侧字段名的守卫是它 `config_test.go` 里的 `TestParseNodeMatchesArktsFieldNames`；
+契约见 [`ipc-contract.md`](ipc-contract.md) §4/§5。
+
+**验证状态**：ArkTS 侧已通过一次**全量 clean 构建**（🧪 2026-10-11，`hvigorw clean` + `assembleHap`
+→ `32 executed`，产出 2.4 MB 未签名 HAP，`BUILD SUCCESSFUL`）；原生侧 `go build` / `go vet` /
+`go test` 通过（🧪）。**两侧均未在真机上运行过**。
