@@ -13,14 +13,19 @@
  *                       docs/design/ipc-contract.md §2）。
  *   onDestroy()      -> 清理定时器 + process.ProcessManager().exit(0) 退出扩展进程
  *
- * ⚠️ 关于 onConnect / onDisconnected：
- *   它们是**本项目自创的方法名**。本机 SDK 的
- *   @ohos.app.ability.VpnExtensionAbility.d.ts 只声明了 onCreate(want) 与 onDestroy()
- *   （已逐行复核），运行时是否回调它们属于未证实项。因此：
- *   - 网卡的创建放在 onCreate —— 那是唯一**确定**会被调用的入口。若等 onConnect
- *     才创建，而运行时又不调用它，结果就是"扩展起来了、却没有任何网卡"，VPN 完全不生效；
- *   - onConnect / onDisconnected 只作为"若某版本确实会回调则额外可观测/兜底"保留，
- *     并且与 onCreate 共享幂等守卫，绝不会重复建网卡。
+ * 关于 onConnect / onDisconnected（2026-10-12 真机修正）：
+ *   本机 SDK 的 @ohos.app.ability.VpnExtensionAbility.d.ts 只声明了
+ *   onCreate(want) 与 onDestroy()，**没有**声明 onConnect。此前据此推断
+ *   "运行时可能不回调它们"。
+ *
+ *   🧪 真机日志（华为 TYR-AL00 / HarmonyOS 6.1.0.145）证明 **`onConnect` 确实会被回调**：
+ *       VpnAbility onCreate config= asset= socksPort=10808 httpPort=10809
+ *       onRequest, want:VpnAbility, startId:1
+ *       VpnAbility onConnect (non-contract, idempotent fallback)
+ *   但**网卡的创建仍然留在 onCreate**：那是 SDK 契约保证的入口，
+ *   依赖一个未写进 .d.ts 的回调去建网卡，一旦某个版本不回调就是
+ *   "扩展起来了、却没有任何网卡"，VPN 完全不生效。
+ *   onConnect / onDisconnected 继续只作为幂等兜底与额外可观测点保留。
  *
  * 说明：数据面通过 core/Bridge 的 `DataPlane` 门面调用原生 tun2socks
  * （libhevsocks5tun.so，构建见 scripts/build-tun2socks.*）。内核 libcore.so 的
@@ -38,6 +43,13 @@ import {
   APP_BUNDLE_NAME,
   CORE_HTTP_PORT,
   CORE_SOCKS_PORT,
+  CORE_STATE_ERROR,
+  CORE_STATE_HTTP_PORT,
+  CORE_STATE_SOCKS_PORT,
+  CORE_STATE_STARTED,
+  CORE_STATE_VERSION,
+  CORE_STATE_WIRED,
+  VPN_CORE_STATE_EVENT,
   VPN_IFACE_NAME,
   VPN_TRAFFIC_EVENT,
   VPN_TUN_ADDRESS,
@@ -48,7 +60,8 @@ import {
   WANT_KEY_HTTP_PORT,
   WANT_KEY_SOCKS_PORT
 } from '../constants/Common';
-import { DataPlane, DataPlaneStartResult } from '../core/Bridge';
+import { Bridge, DataPlane, DataPlaneStartResult, StartCoreResult } from '../core/Bridge';
+import { ConfigStore } from '../core/ConfigStore';
 
 /** 日志域 / 标签（扩展进程独立打日志，便于 hdc 过滤） */
 const DOMAIN: number = 0x0000;
@@ -56,8 +69,41 @@ const TAG: string = 'VpnAbility';
 
 /** 流量上报间隔（毫秒） */
 const TRAFFIC_INTERVAL_MS: number = 1000;
-/** 默认 MTU（与设置页默认值保持一致，可被配置覆盖） */
-const DEFAULT_MTU: number = 1500;
+/**
+ * 隧道 MTU（同时写入 `VpnConfig.mtu` 与 tun2socks 的 `tunnel.mtu`，两者必须是同一个值）。
+ *
+ * 🔴 **这里从 1500 改成 1280，是有依据的，不是随手调小**（2026-10-12 真机实测 + 官方文档）：
+ *
+ *   1. API 允许范围是 `[576,1500]`
+ *      （`@ohos.net.vpnExtension.d.ts:322-328`），1280 合法；而官方 VPN Demo 用的是
+ *      **1400**（它的数据面是裸 UDP 隧道，没有 TLS 头）。
+ *   2. 本机的上行网卡 `rmnet0` 的 MTU 实测就是 **1400**（`ifconfig rmnet0`）。
+ *      而我们的隧道比官方 Demo 多一层 Xray 的 REALITY/TLS：内层一个满段载荷
+ *      会被包成 `载荷 + TLS 记录头(~21) + 外层 TCP(~32，含时间戳选项) + 外层 IP(20)`
+ *      ≈ `载荷 + 73` 字节再上路。
+ *   3. 于是"内层满段"的约束是：`MSS ≤ 1400 − 73 = 1327`，而 `MSS = MTU − 40`，
+ *      ⇒ `MTU ≤ 1367`。**用 1500（MSS 1460）时，每一个满段在内层都要被外层 TCP
+ *      重切成两段** —— 大流量下包数翻倍，正是"下行慢"的典型形态（上传是小包，
+ *      基本不受影响，所以症状表现为"上行正常、下行几乎不动"）。
+ *      取 **1280**（MSS 1240，外层 ≤ 1313）留出约 87 字节余量，避免运营商把上行
+ *      MTU 降到 1400 以下时再次踩线。
+ *
+ * ⚠️ 后续应改由设置页的 MTU 项驱动（经 want.parameters 传给扩展进程），
+ * 而不是在这里写死；设置页的 `MTU_MIN/MTU_MAX` 已经是 576/1500。
+ */
+const DEFAULT_MTU: number = 1280;
+/**
+ * `vpn.create()` 的创建超时（毫秒）。
+ *
+ * 🔴 **为什么必须有这条兜底**（2026-10-12 真机实测）：`vpn.create()` 曾经
+ * **既不 resolve 也不 reject** —— 而系统层面 VPN 已经生效：`vpn-tun` 接口建起来了、
+ * 默认路由被接管。结果是所有应用的流量进了 TUN 却没有任何进程在读它，
+ * **手机直接断网**，并且从应用到自己日志里**没有任何一处报错**。
+ * 超时后结束扩展进程，系统会随之撤销 VPN，用户网络自动恢复。
+ */
+const CREATE_TIMEOUT_MS: number = 8000;
+/** 内核启动后转写到本进程日志的 Xray 日志行数（见 startCoreInProcess） */
+const CORE_LOG_TAIL_LINES: number = 80;
 // ⚠️ 这里**不再**有 `const SOCKS_PORT = 10808`。
 // 端口由 UI 进程通过 want.parameters 传进来（WANT_KEY_SOCKS_PORT / WANT_KEY_HTTP_PORT），
 // 因为扩展是**另一个进程**，拿不到 UI 的 ConfigPathResult；回落值统一取
@@ -83,21 +129,52 @@ export default class VpnAbility extends VpnExtensionAbility {
    */
   private vpnCreating: boolean = false;
   private vpnCreated: boolean = false;
+  /** `vpn.create()` 的看门狗定时器 id；-1 表示未启动。语义见 CREATE_TIMEOUT_MS。 */
+  private createWatchdogId: number = -1;
   /** 定时器 id */
   private timerId: number = -1;
   /** 上一次采样的收发字节数，用于计算瞬时速率 */
   private lastTx: number = 0;
   private lastRx: number = 0;
+  /** 内核是否已在**本进程**（扩展进程）启动 */
+  private coreStarted: boolean = false;
+  /** 内核版本（供状态上报） */
+  private coreVersion: string = '';
 
   onCreate(want: Want): void {
     this.configPath = readWantString(want, WANT_KEY_CONFIG_PATH);
     this.assetPath = readWantString(want, WANT_KEY_ASSET_PATH);
+    // ⚠️ SDK 注明 `want.parameters` **只在首次启动 VPN 时传递**
+    // （`@ohos.net.vpnExtension.d.ts:78`）—— 第二次连接起上面两个都会是空串。
+    // 而内核现在**由本进程拉起**，路径不能靠碰运气：沙箱布局是确定的，自己算。
+    // 曾经的隐患：CoreService.Start 拿到空 configLocation 会退化成"纯诊断调用"，
+    // **静默不启动内核**，而日志上看起来一切正常。
+    if (this.configPath.length === 0) {
+      const filesDir: string = this.context.filesDir;
+      this.configPath = ConfigStore.configFilePath(filesDir);
+      this.assetPath = ConfigStore.assetsDirPath(filesDir);
+      console.info(`${TAG} want carried no paths; derived from filesDir=${filesDir}`);
+    }
     // 端口从 want 收；收不到就用常量回落。两者都会打印，方便在真机上一条日志就
     // 看出"tun2socks 要连的端口"与"内核该监听的端口"是否一致。
     this.socksPort = readWantPort(want, WANT_KEY_SOCKS_PORT, CORE_SOCKS_PORT);
     this.httpPort = readWantPort(want, WANT_KEY_HTTP_PORT, CORE_HTTP_PORT);
     console.info(`${TAG} onCreate config=${this.configPath} asset=${this.assetPath} `
       + `socksPort=${this.socksPort} httpPort=${this.httpPort}`);
+
+    // 注册「用户授权结果」观察者（API 26 起可用）。
+    // 只为一件事：让日志能区分**授权被拒**与**扩展起来了但网卡没建成** ——
+    // 没有它，这两种情况在 hilog 里完全一样（都只有一句 onCreate），
+    // 而它们的排查方向相反。
+    try {
+      const observer: vpnExtension.VpnObserver = vpnExtension.createVpnObserver();
+      observer.onAuthorizationResult((granted: boolean) => {
+        console.info(`${TAG} user authorization result: ${granted}`);
+      });
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      console.warn(`${TAG} createVpnObserver unavailable: ${err.code} ${err.message}`);
+    }
 
     try {
       this.vpnConnection = vpnExtension.createVpnConnection(this.context);
@@ -162,21 +239,60 @@ export default class VpnAbility extends VpnExtensionAbility {
     this.vpnCreating = true;
 
     const config: vpnExtension.VpnConfig = buildVpnConfig();
+    // 打点在**调用之前**：真机上曾出现 create() 哑火，"调用前"这一条是
+    // 区分"根本没调到"与"调了但没回来"的唯一依据。
+    // （不在这里打印 config 的字段：`VpnConfig` 的数组字段都是可选的，
+    //  ArkTS 严格模式下要额外做收窄，收益不抵风险 —— 配置形状由 buildVpnConfig 决定。）
+    console.info(`${TAG} vpn.create() -> begin`);
+
+    // 看门狗（理由见 CREATE_TIMEOUT_MS）：到点仍未建成，就结束扩展进程，
+    // 让系统撤销 VPN，把用户的网络还回去。宁可"连接失败"，也不许"静默断网"。
+    this.clearCreateWatchdog();
+    this.createWatchdogId = setTimeout(() => {
+      this.createWatchdogId = -1;
+      if (this.vpnCreated) {
+        return;
+      }
+      console.error(`${TAG} vpn.create() did not settle within ${CREATE_TIMEOUT_MS}ms; `
+        + `exiting the extension process to release the VPN and restore connectivity`);
+      const processManager: process.ProcessManager = new process.ProcessManager();
+      processManager.exit(0);
+    }, CREATE_TIMEOUT_MS);
+
     vpn.create(config).then((vfd: number) => {
+      this.clearCreateWatchdog();
       this.vpnCreating = false;
       this.vpnCreated = true;
       console.info(`${TAG} vpn created, vfd=${vfd}`);
-      // 网卡就绪 -> 立刻把 fd 交给 tun2socks（数据面）。
-      // 这一步失败**不影响**网卡与上报：扩展仍然"能授权、能建网卡"，只是流量
-      // 过不去。失败原因会写进 hilog —— 这正是 AGENT.md §9 第 2 步
-      // （先单独验证空壳 VPN）想要的行为。
-      this.startDataPlane(vfd);
-      this.startTrafficReporting();
+      // 必须**先**豁免本进程自己的出站，再启动内核与数据面：
+      // 内核对代理服务器的那条 TCP 一旦被自己的默认路由
+      // 抓回 `vpn-tun`，就是一个自我吞噬的环 —— 症状正是扩展进程 ~100% CPU 空转、
+      // 上行计数照涨、下行归零。见 protectOwnProcessNet 的注释。
+      this.protectOwnProcessNet();
+      // 顺序有意义（2026-10-12 修正）：
+      //   1. **先在扩展进程内启动内核**（本地 SOCKS/HTTP 入站）；
+      //   2. 再把 fd 交给 tun2socks —— 它一起来就会去连 10808。
+      // 反过来的话，首批连接会打到没人监听的口上。
+      // 为什么内核要放在扩展进程：见 startCoreInProcess 的注释。
+      this.startCoreInProcess().then(() => {
+        this.startDataPlane(vfd);
+        this.startTrafficReporting();
+      });
     }).catch((error: BusinessError) => {
+      this.clearCreateWatchdog();
       this.vpnCreating = false;
       // 2203002 = VPN 已存在：上一次没 destroy 干净，需要用户先断开再重试。
       console.error(`${TAG} vpn.create failed: ${error.code} ${error.message}`);
     });
+  }
+
+  /** 取消 `vpn.create()` 看门狗（幂等）。 */
+  private clearCreateWatchdog(): void {
+    if (this.createWatchdogId < 0) {
+      return;
+    }
+    clearTimeout(this.createWatchdogId);
+    this.createWatchdogId = -1;
   }
 
   /** 幂等地销毁虚拟网卡（onDisconnected 与 onDestroy 都会调用）。 */
@@ -187,6 +303,7 @@ export default class VpnAbility extends VpnExtensionAbility {
     }
     this.vpnCreated = false;
     this.vpnCreating = false;
+    this.clearCreateWatchdog();
     // 先停数据面再销毁网卡：反过来会让 tun2socks 在已经关闭的 fd 上读，
     // 日志里会出现一串 "read: bad file descriptor" 之类的噪声。
     this.stopDataPlane();
@@ -194,6 +311,136 @@ export default class VpnAbility extends VpnExtensionAbility {
       console.info(`${TAG} vpn destroyed`);
     }).catch((error: BusinessError) => {
       console.error(`${TAG} vpn.destroy failed: ${error.code} ${error.message}`);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // 防环：让本应用自己的出站绕过 VPN
+  // -------------------------------------------------------------------------
+
+  /**
+   * 让**本应用的进程**（其中承载内核出站的那条 TCP）绕过 VPN 路由，直连物理网络。
+   *
+   * 官方接口（本机 SDK `@ohos.net.vpnExtension.d.ts:267-275`，**@since 22**）：
+   *   > Protects application processes against a VPN connection. The data sent through
+   *   > the protected processes is transmitted over the physical network without
+   *   > traversing the VPN.
+   *
+   * **为什么需要它，而不只是 `blockedApplications`**：
+   *   `blockedApplications` 的语义是"列表里的应用**不**按 routes 被代理"
+   *   （`:377-388`），本仓库此前据此断言"自身包名在列表里就止住了环路"——
+   *   但那个断言自标 ❓ 未验证（`TODO.md` §2.2）。
+   *   而 `protectProcessNet` 是官方**专门**为"保护应用进程自身出站"提供的接口：
+   *   语义没有歧义，而且是**进程级**的、不需要 fd —— 这恰好解决了当初
+   *   `protect(socketFd)` 走不通的问题（Go 侧没有 hook 能把自建 socket 的 fd
+   *   交给 ArkTS 去保护）。
+   *
+   *   两个都留着：一个走官方推荐路径保证正确性，另一个继续兜住进程级以外的情形。
+   *
+   * ⚠️ 运行时可能不存在（本机实测 `createVpnObserver` 就是 `.d.ts` 里有、
+   * 运行时 `is not callable`），所以这里必须 try/catch 并如实记日志，
+   * 绝不能让防环失败把建网卡流程带崩。
+   */
+  private protectOwnProcessNet(): void {
+    const vpn: vpnExtension.VpnConnection | undefined = this.vpnConnection;
+    if (vpn === undefined) {
+      return;
+    }
+    try {
+      vpn.protectProcessNet().then(() => {
+        console.info(`${TAG} protectProcessNet ok: this process bypasses the VPN`);
+      }).catch((error: BusinessError) => {
+        console.error(`${TAG} protectProcessNet rejected: ${error.code} ${error.message}`);
+      });
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      console.warn(`${TAG} protectProcessNet unavailable: ${err.code} ${err.message}`);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 内核（Xray）：由**本进程**（扩展进程）拉起
+  // -------------------------------------------------------------------------
+
+  /**
+   * 在**扩展进程内**启动 Xray 内核，并在启动后把状态上报给 UI 进程。
+   *
+   * 🔴 **为什么必须在这里，而不是 UI 进程**（2026-10-12 真机实测）：
+   *   `CoreService.Start` 原先由 UI 进程的 `ConnectionViewModel.connect()` 调用，
+   *   于是内核跑在 **UI 进程**里。而用户一切到别的应用，UI 进程就被系统冻结
+   *   —— 实测 `/proc/<pid>/stat` 的 cpuTicks 在 10 秒内 delta 恰好为 0。
+   *   Xray 的 accept 循环随之停摆，连锁反应是：
+   *     * 扩展进程里的 tun2socks 把流量交给 `127.0.0.1:10808` → **没人应答**；
+   *     * `netstat` 上出现大量 `SYN_SENT`，10808 的 accept 队列堵死
+   *       （`LISTEN` 行的 Recv-Q 常年 20+）；
+   *     * **上行计数照涨**（app 写进 tun），**下行归零**；
+   *     * 扩展进程因为反复重试而 ~100% CPU 空转。
+   *   净效果是"盯着它时能用、一切后台就废"。
+   *
+   *   扩展进程是系统为 VPN 保活的进程，不随前台/后台被冻结 —— 内核放这里，
+   *   数据面才能持续工作。这也是 `ConnectionViewModel.ets` 头注释原本就写明的
+   *   设计（"由扩展进程拉起 Xray"）—— 此前**实现与它不符**。
+   */
+  private async startCoreInProcess(): Promise<void> {
+    let started: StartCoreResult;
+    try {
+      started = await Bridge.startCore(this.configPath, this.assetPath, this.socksPort, this.httpPort);
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      const reason: string = 'start-core threw: ' + err.code.toString() + ' ' + err.message;
+      console.error(`${TAG} ${reason}`);
+      this.publishCoreState(false, false, '', reason);
+      return;
+    }
+
+    for (let i = 0; i < started.notes.length; i++) {
+      console.warn(`${TAG} core note: ${started.notes[i]}`);
+    }
+    if (!started.ok) {
+      const reason: string = started.error.length > 0 ? started.error : 'start-core-failed';
+      console.error(`${TAG} core start failed: ${reason}`);
+      this.publishCoreState(false, false, '', reason);
+      return;
+    }
+
+    this.coreStarted = true;
+    // 版本也必须在**本进程**问：`libcore.so` 按进程各加载一份，
+    // UI 进程问到的只是它自己那份从未启动过的空实例。
+    this.coreVersion = await Bridge.version();
+    console.info(`${TAG} core started in the extension process, version=${this.coreVersion}`);
+    // 把内核自己的日志转写到本进程的 console（进而进 hilog）。
+    // Xray 的日志只进内存环形缓冲，不落盘也不进 hilog
+    // （`golang/service/log/log.go:158-178`），而**只有持有内核的那个进程**读得到它 ——
+    // 现在那个进程是扩展进程，所以这里才是唯一有意义的抓取点。没有它，
+    // "连上了但某个站打不开 / 下载不动"在设备侧完全不可观测。
+    await Bridge.dumpCoreLog(CORE_LOG_TAIL_LINES);
+    // 此刻"入站已监听"成立，但数据面还没起来 —— wired 仍为 false，
+    // 等 startDataPlane 成功后再上报一次。绝不提前把 wired 说成 true。
+    this.publishCoreState(true, false, this.coreVersion, '');
+  }
+
+  /**
+   * 把内核状态上报给 UI 进程。
+   *
+   * 跨进程是必须的：UI 进程里读 `CoreService.Status` 只会读到自己那份空实例。
+   * 顺带这也给出了一个**诚实的 `wired`** —— Go 内核里那个字段恒为 false，
+   * 是一句改不掉的假话（`golang/service/core/core.go:110-114`、`:210`；
+   * 改它要重编 `.so`，而 Windows 上交叉编译不出来，见 TODO.md §1.1）。
+   * 这里的定义是：「内核已启动」**且**「tun2socks 已运行」。
+   */
+  private publishCoreState(started: boolean, wired: boolean, version: string, error: string): void {
+    const parameters: Record<string, Object> = {};
+    parameters[CORE_STATE_STARTED] = started;
+    parameters[CORE_STATE_WIRED] = wired;
+    parameters[CORE_STATE_VERSION] = version;
+    parameters[CORE_STATE_SOCKS_PORT] = this.socksPort;
+    parameters[CORE_STATE_HTTP_PORT] = this.httpPort;
+    parameters[CORE_STATE_ERROR] = error;
+    const options: commonEventManager.CommonEventPublishData = { parameters: parameters };
+    commonEventManager.publish(VPN_CORE_STATE_EVENT, options, (err: BusinessError) => {
+      if (err !== undefined && err !== null && err.code !== 0) {
+        console.warn(`${TAG} publish core state failed: ${err.code}`);
+      }
     });
   }
 
@@ -214,11 +461,16 @@ export default class VpnAbility extends VpnExtensionAbility {
     DataPlane.start(yaml, tunFd).then((result: DataPlaneStartResult) => {
       if (result.started) {
         console.info(`${TAG} tun2socks running (lib=${result.libPath})`);
+        // 到这一步"内核在监听 + tun2socks 在跑"才同时成立 —— 这才是真的 wired。
+        this.publishCoreState(this.coreStarted, this.coreStarted, this.coreVersion, '');
       } else {
         console.error(`${TAG} tun2socks not started: ${result.error}`);
+        this.publishCoreState(this.coreStarted, false, this.coreVersion, result.error);
       }
     }).catch((error: BusinessError) => {
       console.error(`${TAG} tun2socks start rejected: ${error.code} ${error.message}`);
+      this.publishCoreState(this.coreStarted, false, this.coreVersion,
+        'tun2socks start rejected: ' + error.code.toString());
     });
   }
 

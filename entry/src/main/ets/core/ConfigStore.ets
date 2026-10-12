@@ -40,6 +40,17 @@ export class ConfigStore {
     return filesDir + '/' + CORE_DIR_NAME;
   }
 
+  /**
+   * <filesDir>/core/config.json（纯拼接，不创建）。
+   *
+   * 给 **VPN 扩展进程**用：SDK 注明 `want.parameters` 只在首次启动 VPN 时传递
+   * （`@ohos.net.vpnExtension.d.ts:78`），第二次起扩展收不到路径；而内核现在由
+   * 扩展进程自己拉起，路径必须可靠 —— 沙箱布局是确定的，自己算即可。
+   */
+  static configFilePath(filesDir: string): string {
+    return ConfigStore.coreDirPath(filesDir) + '/' + CONFIG_FILE_NAME;
+  }
+
   /** <filesDir>/assets（纯拼接，不创建） */
   static assetsDirPath(filesDir: string): string {
     if (filesDir.length === 0) {

@@ -4,10 +4,14 @@
  *
  * 连接流程（真实链路）：
  *   1. Bridge.generateConfig()  -> 在沙箱里生成内核 config.json
- *   2. Bridge.connectVpn()      -> startVpnExtensionAbility + connectServiceExtensionAbility
+ *   2. Bridge.connectVpn()      -> startVpnExtensionAbility（用户授权后扩展进程建 vpn-tun）
  *   3. Bridge.startCore()       -> 由扩展进程拉起 Xray/sing-box
  *   4. TrafficMonitor 订阅 VPN_TRAFFIC 刷新速率/累计流量
- * 断开流程按 3 -> 2 的顺序反向执行。
+ * 断开流程：stopCore -> stopVpnExtensionAbility。
+ *
+ * ⚠️ 第 2 步**不再**用 `connectServiceExtensionAbility`（2026-10-12 真机实测否掉了那条路，
+ * 证据见 `core/Bridge.ets#connectVpn`），因此这里也不再持有 ServiceExtension 连接 id ——
+ * `connectionId` 现在只表示"扩展是否被成功拉起"（0 成功 / -1 失败）。
  *
  * MOCK 模式下 1~3 由 Bridge 内部模拟，4 由本文件用定时器产生模拟流量，
  * 从而让 UI 的「连接 / 速率 / 累计流量」在没有内核时也是可见、可验证的。
@@ -15,7 +19,8 @@
 import { common } from '@kit.AbilityKit';
 import { ConnectionState, emptyTrafficStats, RoutingMode, TrafficStats } from '../model/Types';
 import { nodeToJsonText, ServerNode } from '../model/ServerNode';
-import { Bridge, ConfigPathResult, MOCK_BRIDGE, StartCoreResult } from '../core/Bridge';
+import { Bridge, ConfigPathResult, MOCK_BRIDGE } from '../core/Bridge';
+import { CoreState, CoreStateMonitor } from '../core/CoreStateMonitor';
 import { ConfigStore } from '../core/ConfigStore';
 import { TrafficMonitor } from '../core/TrafficMonitor';
 import { Logger } from '../utils/Logger';
@@ -25,6 +30,13 @@ import { settingsViewModel } from './SettingsViewModel';
 const TAG: string = 'ConnectionViewModel';
 /** MOCK 流量刷新间隔（毫秒） */
 const MOCK_TICK_MS: number = 1000;
+/**
+ * 等待扩展进程上报内核状态的超时（毫秒）。
+ *
+ * 超时就如实报错**并把已经拉起的 VPN 收掉** —— 宁可"连接失败"，也不留一个
+ * "抓了所有流量却没人处理"的网卡（那正是用户断网的形态）。
+ */
+const CORE_STATE_TIMEOUT_MS: number = 15000;
 
 /** 连接页 ViewModel */
 @ObservedV2
@@ -69,7 +81,10 @@ export class ConnectionViewModel {
     this.trafficBound = true;
     this.routingMode = settingsViewModel.routingMode;
     this.bindTraffic();
-    this.refreshCoreVersion();
+    // 只订阅事件，**不**在这里问内核版本：内核跑在扩展进程里，UI 进程去问只会
+    // 白搭一次 33 MB 的 `libcore.so` 加载，再拿到自己那份从未启动过的空实例的答案。
+    // 版本由扩展进程在启动后随状态事件一起上报（见 CoreStateMonitor）。
+    CoreStateMonitor.start();
   }
 
   /** 订阅流量事件 */
@@ -80,14 +95,10 @@ export class ConnectionViewModel {
     this.traffic = TrafficMonitor.latest();
   }
 
-  /** 拉取内核版本（Mock 下也能拿到占位版本，便于 UI 展示） */
-  async refreshCoreVersion(): Promise<void> {
-    const version: string = await Bridge.version();
-    if (version.length > 0) {
-      this.coreVersion = version;
-      settingsViewModel.setCoreVersion(version);
-    }
-  }
+  // 说明：这里**曾经**有一个 refreshCoreVersion()，它在 UI 进程里调 Bridge.version()。
+  // 内核搬到扩展进程之后它就成了误导：UI 进程会因此加载一份自己永远不会使用的
+  // libcore.so，并把它那份空实例的答案当成"内核版本"。版本现在随
+  // CoreStateMonitor 的状态事件从扩展进程过来。
 
   /** 当前选中节点 */
   currentNode(): ServerNode | undefined {
@@ -110,7 +121,7 @@ export class ConnectionViewModel {
       return;
     }
     if (this.isConnected() || this.state === ConnectionState.ERROR) {
-      await this.disconnect(context);
+      await this.disconnect();
     } else {
       await this.connect(context);
     }
@@ -156,47 +167,69 @@ export class ConnectionViewModel {
       const socksPort: number = generated.socksPort;
       const httpPort: number = generated.httpPort;
 
-      if (context !== undefined) {
-        this.connectionId = await Bridge.connectVpn(
-          context, this.configPath, this.assetPath, socksPort, httpPort
-        );
-      } else {
-        Logger.warn(TAG, 'connect without UIAbilityContext: VPN extension not started');
+      if (context === undefined) {
+        // 没有 context 就没有 filesDir，配置根本没落盘 —— 如实报错，不要往下走。
+        this.lastError = 'connect-without-context';
+        this.transition(ConnectionState.ERROR);
+        Logger.error(TAG, 'connect aborted: no UIAbilityContext');
+        return;
       }
 
-      const started: StartCoreResult = await Bridge.startCore(
+      // 在发起连接**之前**开始监听内核状态：扩展进程报得很快，先订阅才不会漏掉第一条。
+      CoreStateMonitor.start();
+      this.connectionId = await Bridge.connectVpn(
         this.configPath, this.assetPath, socksPort, httpPort
       );
-      // 成功判据是 `started.ok`（= 信封成功 **且** 原生回报 started===true）。
+
+      // 🔴 内核**不在这里启动**。它由 VPN 扩展进程自己拉起
+      // （`VpnAbility#startCoreInProcess`）—— 这是 2026-10-12 真机实测后的修正：
+      // 原先在 **UI 进程**里启动内核，用户一切到别的应用，UI 进程就被系统冻结
+      // （实测 cpuTicks 10 秒内 delta = 0），Xray 随之停摆；而扩展进程里的
+      // tun2socks 仍在往 10808 送流量 —— `SYN_SENT` 堆积、上行计数照涨、
+      // **下行归零**。完整证据链见 `VpnAbility#startCoreInProcess` 的注释。
       //
-      // 🔴 曾经的真 bug：这里写的是 `started.pid <= 0`，而 `pid` 按契约**恒为 0**
-      // （内核跑在 VPN 扩展进程内，不是独立进程），于是**原生明明启动成功，UI 也
-      // 必然判失败**。pid 不是判据，ok 才是。
-      if (!started.ok) {
-        this.lastError = started.error.length > 0
-          ? 'start-core-failed: ' + started.error
+      // 这里只等扩展进程把真实状态报过来；超时即如实报错，绝不假装成功。
+      const state: CoreState | undefined = await CoreStateMonitor.wait(CORE_STATE_TIMEOUT_MS);
+      if (state === undefined) {
+        this.lastError = 'core-state-timeout';
+        this.transition(ConnectionState.ERROR);
+        Logger.error(TAG, 'the VPN extension reported no core state within '
+          + CORE_STATE_TIMEOUT_MS.toString() + 'ms');
+        // 把已经拉起来的 VPN 收掉，避免留下一个"抓了流量但没人处理"的网卡。
+        await Bridge.disconnectVpn();
+        return;
+      }
+      if (!state.started) {
+        this.lastError = state.error.length > 0
+          ? 'start-core-failed: ' + state.error
           : 'start-core-failed';
         this.transition(ConnectionState.ERROR);
         Logger.error(TAG, 'connect aborted: ' + this.lastError);
         return;
       }
-      // wired=false 是本阶段的常态，不是可以省略的细节：内核起来了但本地入站还没
-      // 真实监听，流量此时过不去。如实体现在状态与日志里，不让 UI 假装"已连通"。
-      this.coreWired = started.wired;
-      for (let i = 0; i < started.notes.length; i++) {
-        Logger.warn(TAG, 'start note: ' + started.notes[i]);
+
+      // 端口以**内核实际声明**的为准（扩展进程回传）；拿不到时回落本地值。
+      const reportedSocks: number = state.socksPort > 0 ? state.socksPort : socksPort;
+      const reportedHttp: number = state.httpPort > 0 ? state.httpPort : httpPort;
+      // wired 的权威定义在扩展进程里：「内核已启动」**且**「tun2socks 已运行」。
+      // （Go 内核自己的 wired 字段恒为 false，是一句改不掉的假话 —— 见 VpnAbility。）
+      this.coreWired = state.wired;
+      if (state.version.length > 0) {
+        this.coreVersion = state.version;
+        settingsViewModel.setCoreVersion(state.version);
       }
       if (!this.coreWired) {
-        Logger.warn(TAG, 'core started but wired=false: no local inbound is listening, '
-          + 'traffic cannot flow yet (this is the expected state in the current phase)');
+        Logger.warn(TAG, 'core started but wired=false: the local inbound is not usable yet '
+          + '(tun2socks not running, or the core refused to listen)');
       }
-      await this.refreshCoreVersion();
+
       this.transition(ConnectionState.CONNECTED);
       this.startMockTrafficIfNeeded();
       Logger.info(TAG, 'core started for ' + node.remarks
-        + ' (socks=' + started.socksPort.toString()
-        + ', http=' + started.httpPort.toString()
-        + ', wired=' + started.wired.toString() + ')');
+        + ' (socks=' + reportedSocks.toString()
+        + ', http=' + reportedHttp.toString()
+        + ', wired=' + this.coreWired.toString()
+        + ', version=' + this.coreVersion + ')');
     } catch (error) {
       this.lastError = Logger.describe(error as Object);
       this.transition(ConnectionState.ERROR);
@@ -205,17 +238,22 @@ export class ConnectionViewModel {
   }
 
   /** 断开连接 */
-  async disconnect(context: common.UIAbilityContext | undefined): Promise<void> {
+  async disconnect(): Promise<void> {
     if (this.state === ConnectionState.DISCONNECTED || this.state === ConnectionState.DISCONNECTING) {
       return;
     }
     this.transition(ConnectionState.DISCONNECTING);
     try {
       this.stopMockTraffic();
-      await Bridge.stopCore();
-      if (context !== undefined && this.connectionId >= 0) {
-        await Bridge.disconnectVpn(context, this.connectionId);
-      }
+      // ⚠️ 这里**不再**调 `Bridge.stopCore()`：内核跑在扩展进程里，UI 进程调它只会
+      // 停掉自己那份从未启动过的空实例，而真正的内核照样在跑 —— 一个"看起来停了、
+      // 其实没停"的假动作，比不做更糟。
+      // 内核由扩展进程在 `onDestroy` 时随进程一起结束；这里只负责让系统关掉扩展。
+      //
+      // **无条件**请求系统关闭扩展（多调一次是幂等的）。漏掉一次的代价是 VPN
+      // 留在那里、用户断网 —— 所以宁滥勿缺。
+      await Bridge.disconnectVpn();
+      CoreStateMonitor.stop();
       this.connectionId = -1;
       this.coreWired = false;
       this.traffic = emptyTrafficStats();

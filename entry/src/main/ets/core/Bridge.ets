@@ -11,10 +11,13 @@
  * 3) 原生契约（由 libbridge.so 提供）：
  *      export const Invoke: (service: string, paramsJson: string) => string;
  *    返回 JSON 信封：{ "success": boolean, "result": object, "error": string }
- * 4) 启动 VPN 走 Ability 层（vpnExtension.startVpnExtensionAbility +
- *    context.connectServiceExtensionAbility），这部分是纯 SDK 调用，不属于原生契约。
+ * 4) 启动 VPN 走 Ability 层（只用 vpnExtension.startVpnExtensionAbility /
+ *    stopVpnExtensionAbility），这部分是纯 SDK 调用，不属于原生契约。
+ *    ⚠️ 这里**曾经**还调用 `context.connectServiceExtensionAbility` —— 2026-10-12
+ *    真机实测证明那是错误用法（会以 ServiceExtension 语义触发 onRequest，
+ *    6 ms 后被系统断开，并与 `vpn.create()` 哑火同时出现）。完整证据见 `connectVpn`。
  */
-import { bundleManager, common, Want } from '@kit.AbilityKit';
+import { Want } from '@kit.AbilityKit';
 import { vpnExtension } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import {
@@ -74,27 +77,23 @@ const TAG: string = 'Bridge';
 /**
  * MOCK 总开关：true = 内存实现（不触发任何原生调用）；false = 走 NativeBridgeImpl。
  *
- * ⚠️ **本阶段必须保持 true，但理由与以前不同。**
+ * **已置为 false（2026-10-12）。** 此前保持 true 的三条理由**全部不再成立**：
+ *   1. ~~没有鸿蒙真机~~ → 已有：华为 `TYR-AL00`（nova 14 活力版），
+ *      `hdc install` 已成功把签名后的 HAP 装上真机。
+ *   2. ~~`libcore.so` 尚未产出~~ → 已有：`harmonybridge-so/libcore.so`
+ *      （34,527,768 B，ELF64 / AArch64 / DYN，TLS 重定位为 `R_AARCH64_TLSDESC`），
+ *      已连同 `libhevsocks5tun.so` 放入 `entry/libs/arm64-v8a/` 并打进 HAP。
+ *   3. ~~真实链路无法验证~~ → 现在正是为了验证它才切换的。
  *
- * 过时的旧理由（**已不成立**）："契约 §5 的原生侧待收敛清单还没做完，RuntimeInfo /
- * SpeedTest / ConfigService.Generate 尚未实现"。这四项**本轮已由 Go 侧实现**，
- * 详见 `BridgeService` 的 §实现状态。
- *
- * 现在保持 true 的真实理由：
- *   1. **没有鸿蒙真机**（AGENT.md §1 / §7 B3）。VPN 授权弹窗、`vpn-tun` 网卡、
- *      内核在本机进程里的加载，全部只能在真机上验证；模拟器大概率不支持 VPN，
- *      不能当验证手段。此时把 UI 切到原生，只会把界面变成一条**无法验证**的路径。
- *   2. **`libcore.so` 尚未产出**（AGENT.md §7 B2：Go→OHOS 工具链被 `socklen_t`
- *      冲突与 cgo TLS 墙阻塞）。`libbridge.so` 能加载，但它 `dlopen("libcore.so")`
- *      必然失败，任何服务调用都只会拿到错误信封。
- *   3. **真实链路无法验证**，因此不得让 UI 表现为"已经连通真链路"。
- *
- * 若把它改成 false：UI 的**每一次**调用都会走 `NativeBridgeImpl`，而它当前**恒返回**
- * `failure('native-bridge-not-linked')` —— 于是版本、连接、延迟、配置生成全部报错，
- * 而这不是"更真实"，只是把"可控的 MOCK 提示"换成"全面失败"。
- * 契约 §5 末尾与 AGENT.md §7 B3 都要求在此之前保持 true。
+ * ⚠️ 切到 false 之后，UI 的每一次调用都会真的走
+ * `libbridge.so` → `dlopen("libcore.so")` → `GoInvoke`：
+ *   * `libcore.so` 加载失败时，界面显示的是来自 `CoreAvailable()` 与失败信封的
+ *     **真实原因**，不再是 `native-bridge-not-linked` 这个占位符；
+ *   * `ConnectionViewModel.connect()` 会真的拉起 VPN 扩展，而 `buildVpnConfig()`
+ *     目前接管全部 IPv4 流量 —— 数据面（tun2socks）不通时症状就是**断网**。
+ *     这是有意暴露的真实行为，不再由 MOCK 掩盖。
  */
-export const MOCK_BRIDGE: boolean = true;
+export const MOCK_BRIDGE: boolean = false;
 
 /** 模拟调用耗时（毫秒），用于让 UI 的连接过程可见 */
 const MOCK_LATENCY_MS: number = 350;
@@ -138,6 +137,15 @@ export class BridgeService {
   static readonly RUNTIME_INFO: string = 'CoreService.RuntimeInfo';
   /** 校验一个节点是否可用（内核侧预检） */
   static readonly VALIDATE_NODE: string = 'ValidatorService.ValidateConfig';
+  /**
+   * 读取内核最近若干条日志。
+   *
+   * ⚠️ 这是**唯一**能看到 Xray 自己说了什么的通道：内核日志只进内存环形缓冲，
+   * 既不落盘也不进 hilog（`golang/service/log/log.go:158-178` 把 File/Console
+   * 两种 handler 都重定向到了 ring）。没有这一步，"连上了但下载不动"这类问题
+   * 在 `hdc` 侧完全不可观测。
+   */
+  static readonly TAIL_LOG: string = 'LogService.Tail';
 }
 
 /** 原生返回的 JSON 信封 */
@@ -458,17 +466,25 @@ class MockBridgeImpl implements IBridge {
 // ---------------------------------------------------------------------------
 class NativeBridgeImpl implements IBridge {
   async invoke(service: string, params: Record<string, Object>): Promise<NativeEnvelope> {
-    // 接入后把下面的 return 删掉，改为：
-    //   const paramsJson: string = JSON.stringify(params);
-    //   const raw: string = bridgeNative.Invoke(service, paramsJson);
-    //   return decodeEnvelope(raw);
-    // decodeEnvelope 已经处理「失败信封没有 result 字段」的情况，不要直接 JSON.parse。
+    // 已接入真实链路（2026-10-12）：
+    //   bridgeNative.Invoke(service, paramsJson)
+    //     -> libbridge.so 的 napi Invoke        （cpp/napi_init.cpp）
+    //     -> 惰性 dlopen("libcore.so") + dlsym("GoInvoke")
+    //     -> Go 侧返回 JSON 信封
     //
-    // ⚠️ 如实说明（2026-10-11）：这一行**仍然**是 `native-bridge-not-linked`，
-    // 本轮没有把它接上真实链路 —— 因为 `libcore.so` 尚未产出、也没有真机可验证。
-    // 因此 `MOCK_BRIDGE` 一旦改成 false，UI 的每一次调用都会拿到失败信封
-    // （见 MOCK_BRIDGE 的注释）。这是有意为之的"未接状态"，不是遗漏。
-    return failure('native-bridge-not-linked');
+    // decodeEnvelope 已经处理「失败信封没有 result 字段」的情况，不要直接 JSON.parse；
+    // 它也兜住"原生返回了非 JSON 文本"这种异常，所以这里不需要再包 try/catch。
+    const paramsJson: string = JSON.stringify(params);
+    const raw: string = bridgeNative.Invoke(service, paramsJson);
+    const envelope: NativeEnvelope = decodeEnvelope(raw);
+    if (!envelope.success) {
+      // 原生侧如实回了失败原因（`libcore.so` 加载失败时，里面是 dlopen 的 dlerror 文本）。
+      // 必须在这里记下来：否则上层只看得到"版本号是空字符串"这种**无法归因**的现象 ——
+      // 无真机时这正是"看起来是绿的"故障形态（对比 TODO.md §4 的那批缺陷）。
+      Logger.error(TAG, 'native invoke ' + service + ' failed: ' + envelope.error
+        + ' (libcore=' + bridgeNative.CoreAvailable() + ')');
+    }
+    return envelope;
   }
 }
 
@@ -484,6 +500,27 @@ export class Bridge {
   /** 当前是否 Mock 模式（UI 顶部横幅据此展示 MOCK 提示） */
   static isMock(): boolean {
     return MOCK_BRIDGE;
+  }
+
+  /**
+   * 诊断：`libcore.so` 的加载状态。
+   *
+   * 返回值语义（与 cpp/napi_init.cpp 的 `CoreAvailable` 一致）：
+   *   `'unknown'` = 还没触发过惰性 dlopen；
+   *   `''`        = 尝试过加载，失败了；
+   *   其它        = 实际加载到的 `libcore.so` 绝对路径。
+   *
+   * 存在的理由：`version()` 等接口在失败时只能返回空串（契约要求"永不抛异常"），
+   * 调用方因此**无法区分**"内核没起来"与"原生桥没接上"。这个方法把区分度补回来。
+   */
+  static coreAvailable(): string {
+    try {
+      return bridgeNative.CoreAvailable();
+    } catch (error) {
+      const err: BusinessError = error as BusinessError;
+      Logger.error(TAG, 'CoreAvailable failed: ' + err.code.toString() + ' ' + err.message);
+      return '';
+    }
   }
 
   /** 通用调用（自动串联原生 Invoke） */
@@ -524,6 +561,34 @@ export class Bridge {
     result.pid = typeof pid === 'number' ? pid as number : 0;
     result.version = typeof version === 'string' ? version as string : '';
     return result;
+  }
+
+  /**
+   * 把内核最近若干条日志转写到**应用日志**（进而进 hilog），便于在 `hdc` 侧排查。
+   *
+   * @returns 实际转写的行数；内核不可达时返回 0 并记一条 warn。
+   *
+   * ⚠️ **进程边界（重要）**：`libcore.so` 是**按进程各加载一份**的 ——
+   * 每个进程有自己的 Go 运行时与自己的服务注册表。因此本方法只能读到
+   * **调用方所在进程**那份内核的日志：谁调用了 `CoreService.Start`，
+   * 谁才持有真正的那个 ring。在 UI 进程里调用它，得到的是 UI 进程那份
+   * （未被使用过、空的）内核的日志。
+   *
+   * 这个方法存在的理由见 `BridgeService.TAIL_LOG` 的注释：没有它，
+   * Xray 的报错在设备侧完全看不到。
+   */
+  static async dumpCoreLog(limit: number): Promise<number> {
+    const envelope: NativeEnvelope = await Bridge.invoke(BridgeService.TAIL_LOG, { 'limit': limit });
+    if (!envelope.success) {
+      Logger.warn(TAG, 'core log unavailable: ' + envelope.error);
+      return 0;
+    }
+    const lines: string[] = stringArrayField(envelope.result, 'lines');
+    for (let i = 0; i < lines.length; i++) {
+      Logger.info(TAG, 'core| ' + lines[i]);
+    }
+    Logger.info(TAG, 'core log lines=' + lines.length.toString());
+    return lines.length;
   }
 
   /**
@@ -700,18 +765,37 @@ export class Bridge {
   // -------------------------------------------------------------------------
 
   /**
-   * 拉起 VPN 扩展并与其 ServiceExtension 建立连接。
-   * @param context 调用方 UIAbilityContext（页面里通过 getContext(this) 取得）
+   * 拉起 VPN 扩展进程（用户会看到系统授权弹窗）。
+   *
+   * 🔴 **这里不再调用 `context.connectServiceExtensionAbility(want, options)`。**
+   *
+   * 2026-10-12 真机实测（华为 TYR-AL00 / HarmonyOS 6.1.0.145）把这条路否掉了：
+   *   * `connectServiceExtensionAbility` 会以 **ServiceExtension 语义**触发扩展的
+   *     `onRequest`（日志里确实出现了 `onRequest, want:VpnAbility, startId:1`）；
+   *   * 紧接着 **6 ms** 连接就被系统断开
+   *     （`onConnect` 之后立刻 `vpn extension disconnected: VpnAbility`）；
+   *   * 同一次调用里 `vpn.create()` **既不 resolve 也不 reject**，
+   *     `DataPlane.start()` 因此从未被调用 —— 而系统层 VPN 已经生效（默认路由被接管），
+   *     结果是**手机断网且无任何报错**。
+   *
+   * VpnExtensionAbility 不是普通 ServiceExtension，SDK 也没提供这种连接用法；
+   * 官方给的可观测手段是 `vpnExtension.createVpnObserver().onAuthorizationResult()`
+   * （@since 26.0.0，见 `@ohos.net.vpnExtension.d.ts:134`），授权结果的监听放在
+   * 扩展进程内 —— 见 `ets/vpnability/VpnAbility.ets#onCreate`。
+   *
    * @param configPath 内核配置文件路径（写入 want.parameters）
    * @param assetPath 资源目录路径（写入 want.parameters）
    * @param socksPort / httpPort 内核本地入站端口（写入 want.parameters）。
    *        扩展进程是**另一个进程**，拿不到 UI 进程的 `ConfigPathResult`，
    *        而它要用 SOCKS 端口去生成 tun2socks 的 YAML —— 不传的话扩展就只能自己
    *        猜一个数字，两侧一漂移就是"tun2socks 连到没人在听的端口"，静默不通。
-   * @returns 连接 id；失败返回 -1
+   *        ⚠️ 但 SDK 注明 `want.parameters` **只在首次启动 VPN 时传递**
+   *        （`@ohos.net.vpnExtension.d.ts:78`），所以扩展必须能容忍收不到
+   *        —— 它确实会回落到 constants/Common.ets 的常量。
+   * @returns `0` 表示扩展已被成功拉起；`-1` 表示拉起失败。
+   *          **不再是 ServiceExtension 连接 id**（已经没有那种连接了）。
    */
   static async connectVpn(
-    context: common.UIAbilityContext,
     configPath: string,
     assetPath: string,
     socksPort: number,
@@ -736,49 +820,26 @@ export class Bridge {
       Logger.error(TAG, 'startVpnExtensionAbility failed: ' + err.code.toString() + ' ' + err.message);
       return -1;
     }
-
-    try {
-      const options: common.ConnectOptions = {
-        onConnect: (elementName: bundleManager.ElementName, remote: Object) => {
-          Logger.info(TAG, 'vpn extension connected: ' + elementName.abilityName);
-        },
-        onDisconnect: (elementName: bundleManager.ElementName) => {
-          Logger.warn(TAG, 'vpn extension disconnected: ' + elementName.abilityName);
-        },
-        onFailed: (code: number) => {
-          Logger.error(TAG, 'vpn extension connect failed: ' + code.toString());
-        }
-      };
-      const connectionId: number = context.connectServiceExtensionAbility(want, options);
-      return connectionId;
-    } catch (error) {
-      const err: BusinessError = error as BusinessError;
-      Logger.error(TAG, 'connectServiceExtensionAbility failed: ' + err.code.toString() + ' ' + err.message);
-      return -1;
-    }
+    Logger.info(TAG, 'vpn extension start requested (authorization dialog is shown by the system)');
+    return 0;
   }
 
-  /** 断开与 VPN 扩展的连接，并通知系统关闭扩展 */
-  static async disconnectVpn(context: common.UIAbilityContext, connectionId: number): Promise<boolean> {
-    let ok: boolean = true;
-    if (connectionId >= 0) {
-      try {
-        await context.disconnectServiceExtensionAbility(connectionId);
-      } catch (error) {
-        const err: BusinessError = error as BusinessError;
-        Logger.warn(TAG, 'disconnectServiceExtensionAbility failed: ' + err.code.toString() + ' ' + err.message);
-        ok = false;
-      }
-    }
+  /**
+   * 通知系统关闭 VPN 扩展（进而撤销 VPN 与 vpn-tun 网卡）。
+   *
+   * 同样**不再**有 `disconnectServiceExtensionAbility`：那是对上面那条错误连接的
+   * 反向操作，连接本身已经不存在了。
+   */
+  static async disconnectVpn(): Promise<boolean> {
     const want: Want = { bundleName: APP_BUNDLE_NAME, abilityName: VPN_ABILITY_NAME };
     try {
       await vpnExtension.stopVpnExtensionAbility(want);
+      return true;
     } catch (error) {
       const err: BusinessError = error as BusinessError;
       Logger.warn(TAG, 'stopVpnExtensionAbility failed: ' + err.code.toString() + ' ' + err.message);
-      ok = false;
+      return false;
     }
-    return ok;
   }
 }
 

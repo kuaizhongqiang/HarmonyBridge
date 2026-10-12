@@ -135,6 +135,53 @@ export class NodeViewModel {
     return node;
   }
 
+  /**
+   * 从本地种子文本导入节点：**每行一条分享链接**，空行与 `#` 开头的行忽略。
+   *
+   * 参数是**文本**而不是文件路径：读文件需要 resourceManager（只有 UI 层拿得到），
+   * 而解析与入库是纯逻辑 —— 这样它也能被单测直接喂字符串。
+   *
+   * 复用 `addNodeFromLink` 的同一条解析 + 校验路径（service/ShareLinkParser +
+   * service/NodeValidator），所以种子里的链接与手工粘贴的链接行为完全一致，
+   * 不存在第二套解析规则。
+   *
+   * 动机见 `constants/Common.ets#LOCAL_NODES_RAWFILE`：真机联调需要真实节点，
+   * 但真实地址与凭据**不得**出现在任何被 git 跟踪的文件里。
+   *
+   * @returns 实际新增的节点数。第一条解析成功的会成为**当前选中节点**；
+   *          种子缺失 / 为空 / 全部解析失败时保持原有选择不变（静默回落）。
+   */
+  loadLocalNodes(text: string): number {
+    const lines: string[] = text.split('\n');
+    let added: number = 0;
+    let firstAddedId: NodeId = '';
+    for (let i = 0; i < lines.length; i++) {
+      const line: string = lines[i].trim();
+      if (line.length === 0 || line.startsWith('#')) {
+        continue;
+      }
+      if (line.indexOf('://') <= 0) {
+        Logger.warn(TAG, 'local seed line ' + (i + 1).toString() + ' is not a share link, skipped');
+        continue;
+      }
+      const node: ServerNode | undefined = this.addNodeFromLink(line);
+      if (node === undefined) {
+        // addNodeFromLink 已把原因写进 lastMessage（parse-failed / invalid-node）
+        Logger.warn(TAG, 'local seed line ' + (i + 1).toString() + ' rejected: ' + this.lastMessage);
+        continue;
+      }
+      added = added + 1;
+      if (firstAddedId.length === 0) {
+        firstAddedId = node.id;
+      }
+    }
+    if (firstAddedId.length > 0) {
+      this.selectNode(firstAddedId);
+    }
+    Logger.info(TAG, 'local seed: added ' + added.toString() + ' node(s)');
+    return added;
+  }
+
   /** 新增一个手动节点（节点编辑表单保存时调用） */
   addNode(node: ServerNode): void {
     // createDraft() 用 'draft-' 前缀做临时 id，真正落库时换成 manual 系列，避免把草稿态写进数据

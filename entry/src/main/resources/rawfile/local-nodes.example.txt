@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# local-nodes.example.txt -- TEMPLATE for the local node seed.
+# ---------------------------------------------------------------------------
+#
+# Copy this file to `local-nodes.txt` (same directory) and put your own links in.
+#
+#   copy local-nodes.example.txt local-nodes.txt        (Windows)
+#   cp   local-nodes.example.txt local-nodes.txt        (Linux/macOS)
+#
+# `local-nodes.txt` is listed in .gitignore and is NEVER committed: it normally
+# contains a live endpoint plus a credential. Only this template is tracked.
+# It IS packaged into the HAP -- that is the whole point: the app reads it at
+# startup so a real node exists on the device without any real value ever
+# appearing in a tracked source file.
+#
+# Format
+# ------
+#   * one share link per line
+#   * blank lines and lines starting with `#` are ignored
+#   * any scheme the app can parse works: vmess:// vless:// trojan:// ss://
+#     hysteria2:// socks://   (see service/ShareLinkParser.ets)
+#   * the first link that parses successfully becomes the SELECTED node
+#
+# If this file is missing (a fresh clone), the app silently falls back to the
+# built-in demo nodes -- no error, no empty screen.
+#
+# Example (PLACEHOLDER values -- replace every one of them)
+# ---------------------------------------------------------------------------
+# vless://00000000-0000-0000-0000-000000000000@node.example.com:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=REPLACE_WITH_REALITY_PUBLIC_KEY&sid=&encryption=none#my-node
+#
+# Notes on the parameters a REALITY node needs (all are v2rayN's own names):
+#   type=tcp|raw     transport. v2rayN shows "raw"; the kernel calls it "tcp".
+#                    Both map to the same thing (service/ShareLinkParser.ets
+#                    transportFromText, and build.go's `case "", "tcp", "raw"`).
+#   security=reality REALITY. `security=tls` for plain TLS.
+#   sni=             serverName. Required by REALITY.
+#   fp=              uTLS fingerprint (chrome / firefox / safari / ...).
+#   pbk=             REALITY publicKey (required).
+#   sid=             REALITY shortId (optional; may be empty).
+#   spx=             REALITY spiderX, e.g. %2F (optional).
+#   flow=            xtls-rprx-vision (optional; only valid with tls/reality).
+#   encryption=none  VLESS has no cipher; the kernel writes "none" itself.

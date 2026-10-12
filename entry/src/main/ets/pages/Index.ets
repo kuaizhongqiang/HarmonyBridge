@@ -5,12 +5,14 @@
  * UI 只负责渲染，所有状态来自 viewmodel/* 的单例。
  */
 import { common } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
 import { ConnectionState, RoutingMode } from '../model/Types';
 import { ServerNode, nodeEndpointText } from '../model/ServerNode';
 import { connectionViewModel, ConnectionViewModel } from '../viewmodel/ConnectionViewModel';
 import { nodeViewModel, NodeViewModel } from '../viewmodel/NodeViewModel';
 import { subscriptionViewModel } from '../viewmodel/SubscriptionViewModel';
 import { settingsViewModel } from '../viewmodel/SettingsViewModel';
+import { LOCAL_NODES_RAWFILE } from '../constants/Common';
 import { Dimens, FontSizes, Radii } from '../constants/Dimens';
 import { Theme } from '../constants/Theme';
 import { RouteParams, RouterHelper, Routes } from '../constants/Routes';
@@ -31,10 +33,36 @@ struct Index {
 
   aboutToAppear(): void {
     this.nodes.init();
+    // 内置演示节点载入之后再叠加本机种子：真实节点排在列表后面，
+    // 并且第一个解析成功的会成为当前选中节点（见 NodeViewModel#loadLocalNodes）。
+    this.loadLocalNodeSeed();
     subscriptionViewModel.init();
     settingsViewModel.init();
     this.connection.init();
     Logger.info(TAG, 'home page ready, mock=' + this.connection.mockMode.toString());
+  }
+
+  /**
+   * 载入本机节点种子（`resources/rawfile/local-nodes.txt`）。
+   *
+   * ⚠️ 这个文件**不入库**（见 `constants/Common.ets#LOCAL_NODES_RAWFILE` 与
+   * `.gitignore`），因为它通常含有真实地址与凭据。因此**缺失是正常情况**：
+   * 全新 clone 上没有它，此时静默跳过，应用照旧用内置演示节点启动。
+   */
+  private loadLocalNodeSeed(): void {
+    let text: string = '';
+    try {
+      const bytes: Uint8Array = this.uiContext().resourceManager
+        .getRawFileContentSync(LOCAL_NODES_RAWFILE);
+      text = util.TextDecoder.create('utf-8').decodeToString(bytes);
+    } catch (error) {
+      // 9001005 Invalid relative path —— 种子文件不存在，属预期路径，不打扰用户。
+      return;
+    }
+    if (text.length === 0) {
+      return;
+    }
+    this.nodes.loadLocalNodes(text);
   }
 
   /** 当前选中的节点（供模板使用） */

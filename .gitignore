@@ -44,6 +44,13 @@
 /tmp/
 /scratch/
 
+# Real node seeds for on-device verification. src/main/resources/rawfile is
+# packaged into the HAP, so a seed placed here gives the app real nodes without
+# touching any tracked source file -- but it usually carries a live endpoint plus
+# a credential (UUID / REALITY public key). NEVER commit it. The committed
+# template is local-nodes.example.txt; see docs/03-环境搭建.md.
+/entry/src/main/resources/rawfile/local-nodes.txt
+
 # Staging directory of scripts/release-local.ps1. It holds a renamed copy of the
 # unsigned HAP plus SHA256SUMS.txt -- build outputs, and this repository never
 # tracks build outputs (AGENT.md section 1: "不提交任何构建产物").
