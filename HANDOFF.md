@@ -2,10 +2,15 @@
 
 > **给新会话看的第一份文件。** 读完这份 + 下面三份文档，就能无缝继续，不需要任何前序上下文。
 >
-> 交接时间：2026-10-11（第二轮）｜ 仓库：`D:\Harmony\Project\Bridge`（HarmonyBridge）
+> 交接时间：**2026-10-12**（第三轮）｜ 仓库：`D:\Harmony\Project\Bridge`（HarmonyBridge）
 >
-> **本轮最重要的变化：OHOS Go 工具链的移植已经做完，并且工具链级验收全过。**
-> 上一轮交接里那个"唯一不需要真机就能推进的硬阻塞"**已经不阻塞了**。
+> **本轮最重要的变化：真机验证完成 —— 整条链路在真机上跑通了。**
+> "编出来"到"能用"这一跳已经完成，两个曾经的"最大未知"（内核能否在 OHOS 上跑、
+> hev 能否接管 vNIC fd）**都有了肯定答案**。
+>
+> ⚠️ 本文下面 §1 之后的内容多为**上一轮（2026-10-11）**的交接记录，
+> 其中涉及"等真机 / 工具链未完成"的表述**已过时**。当前状态以本节、
+> [`README.md`](README.md) 的验证表与 [`TODO.md`](TODO.md) §0 为准。
 
 ---
 
@@ -13,17 +18,26 @@
 
 HarmonyBridge 是 **v2rayN 的鸿蒙原生版**（ArkTS 前端 + Go 内核 + tun2socks 数据面）。
 
-**当前状态**：**能编 OHOS 原生库的 Go 工具链已经造出来了**（路线 1A：把官方 OpenHarmony SIG 的
-Go 移植往前搬到 go1.26）。在**本机 Windows** 上实测：编出工具链 → 编出冒烟库 → 编出真的
-`libcore.so`，`PT_TLS` 与 `R_AARCH64_TLSDESC` 都在。
+**当前状态（2026-10-12）**：**真机验证已完成。** 在 HUAWEI `TYR-AL00`（nova 14 活力版 / API 24）上：
+
+- 自动签名（AGC）→ `hdc install` → 启动：✅
+- `libcore.so`（34.5 MB）`dlopen` + `GoInvoke` 成功，Xray `26.3.27` 正常运行：✅
+- `libhevsocks5tun.so` 接管 OHOS 的 vNIC fd：✅（**这曾是"最大未知"之一**）
+- TUN → tun2socks → `127.0.0.1:10808` → 内核出站，第三方应用可正常上网：✅
+
+版本 **0.2.0**，已打 tag `v0.2.0`。
 
 **你现在可以做的下一件事（按价值排序）**：
 
-1. → **Linux 机器复核**（[`07`](docs/07-Linux机器工作清单.md) P2/P3）：同一 patch 跑 `make.bash` +
-   验收脚本 + `go build std` + `go test` 抽样。**这是"加固"，不是"补做"** —— Windows 侧已经通过。
-2. → **补 DRIFT 组的测试桩**（不阻塞构建，见 [`08`](docs/08-OHOS移植执行笔记.md) §6）。
-3. → **等真机**：`AGENT.md` §9 的 6 步，一切运行期验证的前提（`TODO.md` §1.2）。
-4. → **待拍板**：预编译 `.so` 怎么进 CI/HAP（见下面 §6）。
+1. → **修 IPv6 泄漏**（[`TODO.md`](TODO.md) §2.1）：**不需要重编内核**，当前最实在的隐私缺陷；
+2. → **补 `geoip.dat` / `geosite.dat` 并验证按需下载**（[`TODO.md`](TODO.md) §6.5）：
+   没有它，"绕过大陆"是降级形态（只剩"私有网段直连 + 其余走代理"）；
+3. → **把设置页接线 + 节点持久化 + 前台常驻通知**（[`TODO.md`](TODO.md) §9.5）；
+4. → **根治内核 `wired` 假话**（[`TODO.md`](TODO.md) §2.6）：需在 Linux 上改 `core.go` 后重编 `.so`；
+5. → **待拍板**：长期是否接受**自建 Go fork** 作为工具链（供应链决策，[`TODO.md`](TODO.md) §0.1.1）。
+
+> ⚠️ 每次推 tag 前先手动启动 self-hosted runner（`C:\actions-runner-harmonybridge\run.cmd`），
+> 否则 `publish` 会一直排队 —— 见 [`TODO.md`](TODO.md) §7.4。
 
 ---
 
@@ -131,7 +145,7 @@ cmd /c mklink /J C:\ohndk "D:\Harmony\DevEco Studio\sdk\default\openharmony\nati
 | 1 | **预编译 `.so` 怎么进 CI/HAP** | CI 从 git 检出构建，而 `.so` 按纪律不入库 → 发布出的 HAP 里**没有**内核。需选：对象存储 / Release 资产回填 / runner 预置 |
 | 2 | DRIFT 组的**测试桩**要不要全补 | 不阻塞构建，可最后做 |
 | 3 | 是否补 **amd64** 支持 | 当前**明确只支持 arm64**；SIG 似乎没有 `rt0_openharmony_amd64.s` |
-| 4 | 真机采购 | 一切运行期验证的前提（`TODO.md` §1.2） |
+| 4 | ~~真机采购~~ | ✅ **已到位**：HUAWEI `TYR-AL00`（2026-10-12 完成端到端验证） |
 | 5 | ~~移植是否同时支持 amd64~~ / ~~Go 版本鸿沟~~ | ✅ 已定（arm64；1A） |
 
 ---
@@ -155,5 +169,8 @@ cmd /c mklink /J C:\ohndk "D:\Harmony\DevEco Studio\sdk\default\openharmony\nati
 就能拿到一个**能编 OHOS arm64 原生 `c-shared` 库、且 TLS 走 TLSDESC** 的 Go 工具链；
 `libcore.so` 已经用它在 Windows 上编出来了（五条验收全过）。
 
-**剩下的是"验证与加固"**（Linux 复核、测试桩、真机），而不是"未知"。
-唯一还没被回答的问题仍然是那个不能靠代码回答的：**它在真机上到底能不能跑。**
+**剩下的是"验证与加固"**（Linux 复核、测试桩），而不是"未知"。
+
+> ✅ **那个"不能靠代码回答的问题"已经有答案了（2026-10-12）**：**它在真机上能跑。**
+> 内核在 VPN 扩展进程内 `dlopen`、`GoInvoke` 可调、Xray `26.3.27` 运行正常；
+> `hev` 接管 vNIC fd；端到端可出网。见 [`README.md`](README.md) 的验证表。

@@ -1,8 +1,20 @@
 # HarmonyBridge UI / 信息架构设计
 
-> 版本：v1（UI 脚手架阶段）
+> 版本：**v2（2026-10-12，真机验证后校正）**
 > 参考实现：`third_party/v2rayN`（C# / .NET WPF，GPL-3.0）
 > 本文档描述**已落地**的页面结构、分层、状态模型与约定，并明确列出当前仍是 Mock 的部分与真实原生契约。
+>
+> ⚠️ **本文有两处已被实现推翻**（文中已就地标注，勿照抄）：
+>
+> 1. **§5.2 的 service 表仍是契约冻结前的旧写法**（无点小驼峰 + 旧参数名），
+>    与 [`ipc-contract.md`](ipc-contract.md) §4 直接冲突 —— **以契约为准**；
+> 2. 凡涉及"UI 用 `context.connectServiceExtensionAbility(...)` 连扩展"、
+>    "`VpnAbility` 只建网卡、**不拉起内核**"的段落**均已过时**：
+>    现在只调 `startVpnExtensionAbility`，而且**内核与数据面都跑在扩展进程内**
+>    （见 [`../../AGENT.md`](../../AGENT.md) §2.4 的进程图）。
+>
+> 另：真机验证已于 2026-10-12 完成（见 [`../../TODO.md`](../../TODO.md) §0），
+> 文中"未在真机运行过 / `MOCK_BRIDGE` 仍为 `true`"一类表述已不成立。
 
 ---
 

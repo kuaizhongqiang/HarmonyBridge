@@ -19,18 +19,24 @@
 
 ## 已知限制（发布即成立，非"将来会修"）
 
-- **没有在真机上验证过。** 本项目当前没有 arm64 OHOS 真机，也没有 arm64 模拟器镜像。
-  VPN 授权弹窗、`vpn-tun` 网卡、`tun2socks` 能否处理 VPN fd、分流是否真的生效，
-  **全部未经实测**。详见 `TODO.md` 第 1 节与第 6 节。
-- **`libcore.so` 尚未产出。** 关键流程依赖"在 Linux / WSL 上交叉编译 Go 内核"，
-  该步骤目前**未执行成功**（原因已定位到 Go 标准库的 `socklen_t` 类型冲突，见 `TODO.md` §1.1）。
-  因此本 Release 的 HAP **不包含可用的代理内核**。
-- **`libhevsocks5tun.so` 从未构建成功过。** 数据面配方是从上游 Makefile 推出的，
-  从未执行成功（`TODO.md` §1.3）。
-- **UI 仍运行在 `MOCK_BRIDGE = true`。** 界面可以点，但走的是内存实现，
-  不触碰原生内核；这是当前**正确**的状态，不是 bug（`TODO.md` §3.6）。
+- 🔴 **本 Release 的 HAP 不包含代理内核与数据面。** `libcore.so`（约 34.5 MB）与
+  `libhevsocks5tun.so`（约 287 KB）**都不入库**（`AGENT.md` 第 3 节第 5 条：构建产物不入库），
+  而流水线是从 git 检出后构建的 —— 所以**从本 Release 下载的 HAP 装上也连不了**。
+  要真正跑起来，必须自己构建（见上文），并把这两个 `.so` 放进 `entry/libs/arm64-v8a/`；
+  构建方式见 `scripts/build-core.sh`（需 Linux）与 `scripts/build-tun2socks.*`。
+- **`geoip.dat` / `geosite.dat` 未打包。** rule 模式下按国家/地区分流的规则**不会生成**，
+  分流降级为「私有网段直连 + 其余走代理」（`TODO.md` §6.5）。
 - **IPv6 未接管**，存在 IPv6 泄漏面（`TODO.md` §2.1、
   `docs/00-技术路线可行性.md` §7.2 风险表）。
+- **节点不持久化**：节点只在内存里，冷启动后回到内置演示节点（`TODO.md` §9.5）。
+- **设置页多数项未接线**：MTU / DNS / 分流模式 / 日志级别改了不生效（`TODO.md` §9.5）。
+- **无前台常驻通知、无断线重连**：VPN 扩展被系统回收时用户不会被告知（`TODO.md` §9.5）。
+
+> **关于"能不能跑"**：整条链路**已在真机上验证通过**（2026-10-12，HUAWEI `TYR-AL00` / API 24）：
+> `libcore.so` 的 `dlopen` + `GoInvoke` 正常、`libhevsocks5tun.so` 接管 vNIC fd、
+> TUN → tun2socks → 本地 SOCKS → 内核出站 端到端可上网。
+> **但那验证的是本地构建（含那两个 `.so`）的产物，不是本 Release 的这一份。**
+> 详见 `README.md` 的验证表与 `TODO.md` 第 0 节。
 
 ## 校验
 

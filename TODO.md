@@ -3,7 +3,7 @@
 > 这份清单记录**当前已知的、尚未解决的问题**，包括三类：挡住目标的硬阻塞、
 > 代码/文档里已确认的缺陷、以及"不知道行不行"的未证实项。
 >
-> 最后更新：2026-10-11（与 `docs/00-技术路线可行性.md` §10.4、§11 同一轮）
+> 最后更新：**2026-10-12**（真机验证完成；与 `README.md` / `AGENT.md` v2 同一轮）
 > 上一轮修完的条目已移入 §3，**保留在这里是为了避免重复讨论**。
 >
 > **状态标记**
@@ -14,16 +14,42 @@
 >
 > **本文件的纪律**：只有真的做了才标 ✅。任何"声称已改但实际没改"的条目
 > 本身就是缺陷，必须记录，不能靠改状态糊过去。
-> 本轮就是靠这条纪律发现 `main.go` 里那个**被注释吞掉的语句**（§4.6）。
+> 反过来也一样：**已经真机验证过的事，不许继续挂在 ❓ 下面** —— 那会把下一个人引向
+> 一个已经不用解决的问题。本轮的整理重点就是后者。
 
 ---
 
-## 0. 本轮（2026-10-11）做完的事 —— 一句话
+## 0. 本轮（2026-10-12）做完的事 —— 一句话
+
+**真机验证完成：整条链路从"编出来"走到了"能用"。**
+
+已解除（细节见各条目的 ✅ 标注与 §9）：
+
+| 原条目 | 内容 | 结果 |
+|---|---|---|
+| §1.2 / §0.1.4 | 没有真机 → `dlopen` / `GoInvoke` / 授权弹窗 / `vpn-tun` | ✅ HUAWEI `TYR-AL00`（API 24），全部通过 |
+| §1.1 / §6.2 | `libcore.so` 的 OHOS 交叉编译 | ✅ 34.5 MB 产物在真机上 `dlopen` 成功，返回 Xray `26.3.27` |
+| §1.3 | `libhevsocks5tun.so` 从未构建成功 | ✅ 已构建，且**在真机上接管了 vNIC fd** |
+| §6.1 | **U3**：hev 能否处理 OHOS 的 vNIC fd | ✅ **能** —— 这是原先"最大的两个未知"之一 |
+| §2.2 | `blockedApplications` 是否止住环路 | ✅ 已验证（内核出站源地址是蜂窝 IP，不是 tun 地址） |
+| §3.6 | `MOCK_BRIDGE` 保持 `true` | ✅ 已置为 `false`，走真实原生链路 |
+| §7.4 | 发布流水线 | ✅ `v0.2.0` 已发布，verify / changelog / publish 全绿 |
+
+本轮**新查出并修掉**的真机缺陷（都是运行期才暴露的，详见 §9）：
+ServiceExtension 误连导致 `vpn.create()` 哑火并**静默断网**；内核跑在 UI 进程、切后台被系统冻结；
+隧道 MTU 与上行网卡不匹配；扩展进程依赖只在首次传递的 `want.parameters`。
+
+**仍然未解决**的：§2.1（IPv6 泄漏）、§2.3（`SpeedTest` 仍是占位）、§2.4（`ui.md` 的 service 表）、
+§6.3（C++ 未做真实链接与运行）、§6.5（geo 下载未在真机验证），以及 §9.5 列出的新缺口。
+
+---
+
+## 0.0 上一轮（2026-10-11）做完的事 —— 留档
 
 把"**不需要真机就能验证的部分**"做完了：文档矛盾、Go 服务目录收敛、两处真 bug、
-以及 tag → CI → 发布流水线。**真机相关的部分一件都没变**（没有真机是硬约束）。
+以及 tag → CI → 发布流水线。**真机相关的部分一件都没变**（当时没有真机是硬约束；现已解除）。
 
-而"本轮查出的新缺陷"几乎都有一个共同特征：**它们都被"看起来是绿的"掩盖着** ——
+而"那一轮查出的新缺陷"几乎都有一个共同特征：**它们都被"看起来是绿的"掩盖着** ——
 `go build ./...` 绿（因为 cgo 包被构建约束排除）、`TODO.md` 说"ArkTS 从未编译"
 （所以没人去编）、契约说 `pid` 恒为 0（但 UI 拿它当成功判据）。详见 §4。
 
@@ -116,17 +142,19 @@ B 路线用的是**独立 GOOS `openharmony`**，所以 xray-core 里 `//go:buil
 但两条路线的**运行期行为不完全可比**：构建期 `GOOS=openharmony`，
 而 fork 的 `zgoos_openharmony.go` 里 `const GOOS = "linux"`。❓ 真机行为未验证。
 
-### 0.1.4 ⚠️ 仍然**没有真机验证**（拿到 `.so` 不改变这一条）
+### 0.1.4 ✅ 曾经的三条 ❓ 已由真机全部回答（2026-10-12）
 
-交付方在报告里写明：两个 `.so` **只做了静态验收**。以下依然是 ❓：
+拿到 `.so` 当时确实"不改变那一条"。现在真机跑过了，三条全有答案：
 
-- 真机 `dlopen` 是否成功、`GoInvoke` 是否可调；
-- **外来线程（VPN 扩展进程）调 cgo 是否真的不 SIGSEGV**；
-- hev 能否处理 OHOS 的 vNIC fd（U3，见 §6.1）。
+- ✅ 真机 `dlopen` 成功、`GoInvoke` 可调 → 返回 Xray `26.3.27`；
+- ✅ **外来线程（VPN 扩展进程）调 cgo 没有 SIGSEGV** —— 内核现在就跑在扩展进程里，
+  连续多轮连接/断开均稳定；`R_AARCH64_TLSDESC` 那条工具链级推断得到了运行期印证；
+- ✅ hev 能处理 OHOS 的 vNIC fd（U3，见 §6.1）—— **能**。
 
-### 0.1.5 ⚠️ 怎么把它们放进 HAP —— **仍未接线**
+### 0.1.5 ✅ 已接线并进 HAP（原"仍未接线"）
 
-`entry/libs/arm64-v8a/` 现在**只有 `.gitkeep`**。要让它们进 HAP：
+`entry/libs/arm64-v8a/` 曾经**只有 `.gitkeep`**；现在两个 `.so` 已就位并打进 HAP
+（HAP 由 2.6 MB → **37.7 MB**，`hdc install` 成功）：
 
 ```powershell
 copy harmonybridge-so\libcore.so         entry\libs\arm64-v8a\
@@ -134,11 +162,11 @@ copy harmonybridge-so\libhevsocks5tun.so entry\libs\arm64-v8a\
 ```
 
 - ✅ `entry/libs/**/*.so` 已被 `.gitignore` 挡住（**产物不入库**，正确）；
-  `/harmonybridge-so/` 也已加入 ignore（防 `git add -A` 误装 33 MB）。
-- ⚠️ **发布流水线的 HAP 里不会有这两个 `.so`**：CI 从 git 检出后构建，而这俩不入库。
-  见 §7.6。
-- ⚠️ 交付方**刻意没有替你选 A/B**，也**没有**把 `.so` 放进 `entry/libs/`
-  （理由："不想用'文件已经在那儿了'来替负责人默认选一条"）—— 这个判断是对的。
+  `/harmonybridge-so/` 也已加入 ignore（防 `git add -A` 误装 34 MB）。
+- ✅ 已用 `SHA256SUMS.txt` 逐个校验过完整性。
+- ⚠️ **发布流水线的 HAP 里仍然不会有这两个 `.so`**：CI 从 git 检出后构建，而这俩不入库
+  —— 这是**有意的**（产物不入库是硬规则）。意味着**从 Release 下载的 HAP 不含内核**，
+  只能自己构建。见 §7.6。
 
 ---
 
@@ -184,7 +212,10 @@ copy harmonybridge-so\libhevsocks5tun.so entry\libs\arm64-v8a\
 目标不再是 android，于是 `socklen_t` 与 `android/log.h` 两个障碍自然消失。
 完整报告见 [`docs/05-Linux构建执行报告-20261011.md`](docs/05-Linux构建执行报告-20261011.md)。
 
-**仍然 ❓ 的**：真机行为；以及**是否接受个人 fork 作为工具链**（供应链决策，见 §0.1.1）。
+**✅ 真机行为已确认（2026-10-12）**：产物在真机上 `dlopen` 成功、`GoInvoke` 可调、
+Xray 正常运行，内核现在就在 VPN 扩展进程里持续工作。
+**仍未定的只剩一项**：**是否接受个人 fork 作为长期工具链**（供应链决策，见 §0.1.1 与 §0.2）——
+这是**管理决策，不是技术阻塞**。
 A 路线（官方 Go）也能编出，但要 **3 处 hack**（shim + stdlib 补丁 + 空 `liblog.a`），
 且产物 `PT_TLS` 段与 TLS 重定位**都是空的** —— 见 §0.1.1 的对比表。
 
@@ -196,7 +227,8 @@ A 路线（官方 Go）也能编出，但要 **3 处 hack**（shim + stdlib 补�
 > —— 环境准备、两个必须解决的障碍（`android/log.h` shim、`socklen_t` 补丁）、
 > TLS 验收检查、报告模板都在那里。**这一节只记状态，操作步骤看那份。**
 
-**当前状态**：本机（Windows）依然走不通。**这是最靠前的工程任务，因为它不需要真机。**
+**当前状态**：✅ **已解除**。Windows 宿主上依然不能直接编（这一点没变，也不再重要），
+但产物已在 Linux 上编出、进了 HAP、并在真机上跑通。**本条不再是工程任务。**
 
 > ⚠️ **本轮新增的实测结论**：本机**连 WSL 都没装**（`wsl --status` 返回
 > "未安装用于 Linux 的 Windows 子系统"），也没有 Docker。所以"在 Linux 上编"
@@ -209,42 +241,34 @@ A 路线（官方 Go）也能编出，但要 **3 处 hack**（shim + stdlib 补�
 
 ---
 
-### 1.2 ❌ B3：没有真机
+### 1.2 ✅ B3 已解除：有真机了（2026-10-12）
 
-**为什么挡住目标**：以下**全部**没有在真实设备上验证过 —— 网卡能否创建、内核能否启动、
-tun2socks 能否接管 fd、分流规则是否真的生效。本机 SDK 也没有 `arm64-v8a` 的模拟器镜像
-（U2 的模拟器路线在动手前就已断）。
+**设备**：HUAWEI `TYR-AL00`（nova 14 活力版），`6.1.0.145(C00E120R2P5)`，API 24。
+**结果**：签名 HAP 可安装启动；授权弹窗出现；`vpn-tun` 网卡被创建；内核与数据面均正常。
 
-**怎么解**：采购一台 arm64 OHOS 真机，然后按 `AGENT.md` §9 执行
-（**注意：§9 第 4 步已在本轮改对**，不再是"把 fd 交给 Xray tun 入站"）。
+**为什么曾经挡住目标**：网卡能否创建、内核能否启动、tun2socks 能否接管 fd，
+**全部**只能在真实设备上回答。本机 SDK 也没有 `arm64-v8a` 的模拟器镜像。
+→ 现在全部有答案，见 §0 的表格与 §6.1。
 
-**当前状态**：纯资源阻塞，没有技术手段可以绕过。
+**仍然不适用于模拟器**：模拟器不作为 VPN 链路的验证手段（这条判断没变）。
 
 ---
 
-### 1.3 ❌ `libhevsocks5tun.so` 从未构建成功过
+### 1.3 ✅ `libhevsocks5tun.so` 已构建成功并接管了 vNIC fd（2026-10-12）
 
 **位置**：`scripts/build-tun2socks.ps1` / `.sh`
 
-**现象**：配方是按上游 Makefile + 本机 NDK 布局**推出来**的，从未执行成功。
+**结论**：产物 286,736 B、`DT_NEEDED` 只有 `libc.so`（自包含），
+🧪 **真机上 `libhevsocks5tun.so` 成功加载并在 vNIC fd 上运行**，`vpn-tun` 双向计数持续增长。
 
-> ✅ **两个原来的"未确认"已核实（2026-10-11，查上游仓库 `heiher/hev-socks5-tunnel` 2.18.0）**：
-> 1. **上游确实提供 `build.mk`**（仓库根目录），且 `SRCFILES=$(call rwildcard,$(SRCDIR)/,*.c *.S)`
->    —— 所以"配方推错、SRCFILES 为空"这个担心**不成立**；
-> 2. `src/` 下**确实有 .c 源码**（`hev-main.c` / `hev-socks5-tunnel.c` / `hev-tunnel-linux.c` …），
->    不是空壳；许可证是 **MIT**，与我们的边界兼容。
+> 历史上两个担心**都已消解**（2026-10-11 查上游 `heiher/hev-socks5-tunnel` 2.18.0）：
+> 1. 上游确实提供 `build.mk`，`SRCFILES` 由 `rwildcard` 展开 → "配方推错"不成立；
+> 2. `src/` 下确实有 `.c` 源码，许可证 **MIT**，与我们的边界兼容。
 >
-> ❓ **仍未验证**：`third-part/{lwip,yaml,hev-task-system}` 能否交叉到 OHOS musl；
-> 上游 `-Werror` 会不会把交叉编译的告警变成硬失败（脚本已加 `-Wno-error`）。
-> ⚠️ 另有一个结构细节：`.gitmodules` 里除了三个 `third-part/*` 还有 **`src/core`**，
-> 脚本用 `git clone --recursive`，需确认嵌套 submodule 真的拉下来了。
-
-**为什么挡住目标**：这是数据面的实现本体。没有它，`Tun2socksStart` 只能返回
-`libhevsocks5tun.so is not available: …`。
-
-**怎么解**：在 Linux 上跑 `bash scripts/build-tun2socks.sh <ndk>`（同样受 §1.1 的
-WSL 未安装制约）。**如果失败，如实记录失败点**——那份记录本身就是本条的交付物，不要绕过。
-操作细节见 [`docs/04-Linux构建任务书.md`](docs/04-Linux构建任务书.md) §7。
+> ⚠️ **仍然成立的注意事项**：`scripts/build-tun2socks.sh` 直接产出的主库**不是自包含的**
+> （`DT_NEEDED` 含 `libyaml.so` / `liblwip.so` / `libhev-task-system.so`），
+> 真机 `dlopen` 会因找不到兄弟库而失败。仓库交付用的是报告里那版自包含替代品
+> （`make tp-static` + 手工重链三个 `.a`）。**不要直接把脚本的默认产物丢进 HAP。**
 
 ---
 
@@ -267,33 +291,43 @@ WSL 未安装制约）。**如果失败，如实记录失败点**——那份记
 
 ---
 
-### 2.2 ⚠️ `blockedApplications` 已接线，但真机未验证
+### 2.2 ✅ 防环已验证，且已升级为"官方接口 + 名单"双层（2026-10-12）
 
-**位置**：`entry/src/main/ets/vpnability/VpnAbility.ets:366`
+**位置**：`entry/src/main/ets/vpnability/VpnAbility.ets`（`buildVpnConfig` / `protectOwnProcessNet`）
 
-本轮把防环机制**真正接上了**（此前完全没接）：`blockedApplications: [APP_BUNDLE_NAME]`。
-SDK 依据（🧪 本地 `.d.ts` 逐行核对）：
-`@ohos.net.vpnExtension.d.ts:388` 声明 `blockedApplications?: Array<string>`（bundleName 字符串数组）；
-`:378-381` 说明"只有**不在**列表里的应用才按 routes 被代理"；`:371`/`:383` 声明它与
-`trustedApplications` **互斥**，因此只设前者。
+**真机结论**：`netstat` 显示内核对代理服务器的出站**源地址是蜂窝网卡的地址，而不是
+tun 地址（`172.19.0.1`）** → 本应用进程的 egress 确实没有回到 TUN，**环路不存在**。
 
-**为什么仍是 ❓**：`VpnAbility.ets:335` 自己就标了"未验证"。**真机上"自身包名在
-blockedApplications 里是否确实止住环路"没有任何证据。** 验不到的症状是"一连就断网"。
+现在用的是**两层**：
 
-> 顺带：这条此前是**文档说已裁决、代码里根本没接**的状态 ——
+1. **官方 `VpnConnection.protectProcessNet()`**（`@since 22`，**进程级、不需要 fd**）
+   —— 这是防环的**主手段**。`🧪 真机日志：protectProcessNet ok: this process bypasses the VPN`；
+2. `blockedApplications: [APP_BUNDLE_NAME]` 作为第二层兜底（`@ohos.net.vpnExtension.d.ts:388`；
+   `:378-381` 说明"只有**不在**列表里的应用才按 routes 被代理"；与 `trustedApplications` 互斥）。
+
+> **为什么当初漏了 `protectProcessNet`**：早期调研只知道 `protect(socketFd)`（需要 fd，
+> 而 Go/hev 内部 socket 的 fd 拿不到），于是退而用 `blockedApplications` 并把当时的断言
+> 标为 ❓。`protectProcessNet` 是 `@since 22`，比那次调研新，且正好解决"拿不到 fd"的问题。
+> 👉 **教训**：`.d.ts` 要按当前 SDK 版本重新通读，不能沿用旧调研的 API 清单。
+
+> 顺带记录：这条此前曾是**"文档说已裁决、代码里根本没接"**的状态 ——
 > 文档写"改用 `blockedApplications` 防环"，而 `buildVpnConfig()` 里两个名单都没设。
 > 这与 §3.2 的"声称已改"是同一类问题：**文档的结论被当成了实现**。
 
 ---
 
-### 2.3 ⚠️ `CoreService.RuntimeInfo` 与 `PingService.SpeedTest` 是**占位**，不是功能
+### 2.3 ⚠️ `CoreService.RuntimeInfo` 与 `PingService.SpeedTest` 仍是**占位**，不是功能
 
 - `RuntimeInfo`：返回**最近一次 `CoreService.Start` 声明的**端口与配置文件路径。
-  它**不探测**任何真实监听状态（因为本阶段没有监听）。
-- `SpeedTest`：`speedBps` **恒为 0** + `notes` 说明。
+  它**不探测**真实监听状态。（本地 SOCKS/HTTP 入站现在**确实在监听**了，所以这个字段
+  比过去更容易被误读成"它报告了监听状态"——它没有。）
+- `SpeedTest`：`speedBps` **恒为 0** + `notes` 说明。**仍是占位**。
+- `CoreService.Start` 返回的 `wired`：Go 侧**恒为 false 且描述错误**（说"没有任何入站真的在监听"，
+  但它下面 20 行其实真的启动了 Xray）。详见 §2.6。
 
-契约 §4.1 明确允许这个形态（"不得伪造测量值"），所以这不是缺陷，**但它很容易被误读成
-"已实现测速"**。UI 侧必须读 `notes` 再决定展示什么。真机 + 活内核之后才能有真值。
+契约 §4.1 明确允许"占位但不得伪造测量值"这一形态，所以这不是缺陷，
+**但它们很容易被误读成"已实现"**。UI 侧必须读 `notes` 再决定展示什么。
+**根治 `wired` 需要重编 `libcore.so`**（改 `core.go`），见 §2.6。
 
 ---
 
@@ -310,11 +344,37 @@ blockedApplications 里是否确实止住环路"没有任何证据。** 验不�
 
 ---
 
-### 2.5 ⚠️ `wired=false` 没有独立的界面提示
+### 2.5 ⚠️ `wired` 没有独立的界面提示
 
-`ConnectionViewModel.ets:46` 的注释已经把这件事写下来了：要加一条"本地入站未监听"
-的界面提示，需要新增 `$r('app.string.*')` 资源（按 `AGENT.md` 第 3 节第 8 条，
-文案必须走资源文件）。本轮把它落在 `@Trace coreWired` + 日志里，**界面上没有独立提示**。
+**现状（2026-10-12 更新）**：`wired` 不再采信内核那个恒为 `false` 的字段，
+而由**扩展进程**按「内核已启动 **且** tun2socks 已运行」推出，经公共事件
+`VPN_CORE_STATE` 上报给 UI（`ets/core/CoreStateMonitor.ets`）。
+
+**仍然缺的**：界面上**没有独立提示**"本地入站未监听 / 数据面没起来"。
+要做需要新增 `$r('app.string.*')` 资源（按 `AGENT.md` 第 3 节第 8 条，文案必须走资源文件）。
+目前只落在 `@Trace coreWired` + 日志里。
+
+---
+
+### 2.6 ⚠️ Go 内核的 `wired` 字段恒为 `false`，而且它的说明文字是**错的**
+
+**位置**：`entry/src/main/golang/service/core/core.go:110-114`（字段注释）与 `:210`（硬编码）
+
+**事实**：该字段注释断言"**Nothing in this build listens on a port yet** —— 本阶段没有任何进程
+真的在监听"，但它下面 **20 行**的 `:288-301` 的 `xcore.New(config)` + `instance.Start()`
+**真的启动了 Xray**，而生成的配置里就含本地 SOCKS/HTTP 入站。
+
+🧪 真机证据：`netstat` 显示 `127.0.0.1:10808 LISTEN`（uid 属本应用），
+20+ 条到该端口的 `ESTABLISHED` 连接，浏览器可正常出网。**"没有任何入站真的在监听"是假的。**
+
+**为什么没改**：改它要重编 `libcore.so`，而本机（Windows）交叉编译不出来
+（见 §1.1）。所以当前做的是**绕过**，不是根治：
+
+- ArkTS 侧不再采信内核的 `wired`，改由扩展进程按「内核已启动 **且** tun2socks 已运行」推算；
+- 内核返回的 `notes` 里那两句误导性说明**由 UI 侧标注为"内核自述，已知不准"**。
+
+**怎么根治**：在 Linux 上改 `core.go`（把 `Wired` 改成真探测，并改掉那两句注释/notes）后重编。
+**这是同一类"文档/注释当成了实现"的缺陷，而且这次是内核自己在说假话。**
 
 ---
 
@@ -348,11 +408,17 @@ Go 结构体字段、json tag、README 表格全部改完。
 `expectedRoutes`、`Status` 无 `fd`、`extra` 语义 —— 全部完成，
 契约 §4/§5 的状态列已同步为 ✅（并有"不得把计划当已实现"的把关）。
 
-### ✅ 3.6 `MOCK_BRIDGE = true` 仍是**正确状态**
+### ✅ 3.6 `MOCK_BRIDGE` 已置为 `false`（2026-10-12 更正）
 
-`ets/core/Bridge.ets:97`。**理由已经变了**：不再是"原生侧没实现"（那部分做完了），
-而是**没有真机、`libcore.so` 尚未产出、真实链路无法验证**。
-**不要"顺手"把它改成 `false`** —— `NativeBridgeImpl` 仍返回 `native-bridge-not-linked`。
+`ets/core/Bridge.ets`。上一轮这里写的是"仍是**正确状态**，**不要顺手**把它改成 `false`"
+—— **那条已被真机验证推翻**，在此更正：
+
+- `NativeBridgeImpl.invoke` 现在**真的**走 `bridgeNative.Invoke` → `libbridge.so` →
+  `dlopen("libcore.so")` → `GoInvoke`，不再返回 `native-bridge-not-linked`；
+- `libcore.so` 已产出并进 HAP，真机上 `VersionService.GetVersion` 返回 `26.3.27`。
+
+切到 `false` 的真实后果（都是**有意暴露**、不再由 MOCK 掩盖的）：VPN 扩展会被真的拉起，
+数据面不通时症状就是断网。**§9 那些缺陷能被发现，正是因为这个开关被打开了。**
 
 ---
 
@@ -564,13 +630,27 @@ if (started.pid <= 0) { this.lastError = 'start-core-failed'; /* 判为失败 */
 
 ## 6. 未证实项（不知道行不行）
 
-### 6.1 ❓ U3：`hev-socks5-tunnel` 在 OHOS 上能否处理 vNIC fd
+### 6.1 ✅ U3 已证实：**能** —— hev 可以处理 OHOS 的 vNIC fd（2026-10-12）
 
-**为什么关键**：这是整条数据面的**唯一**假设。hev 的后端是为 Linux/Android 写的，
-OHOS 的 vNIC fd 能否被它正常读写，**没有任何证据**。
+这是原先被称为"本项目最大的两个未知"之一。**答案是肯定的。**
 
-**怎么证实**：真机上跑 `Tun2socksStart`，看 `Tun2socksStop` 回传的 `exitCode` / `lastError`
-（这两个字段就是为回答这个问题加的）。
+🧪 真机日志（VPN 扩展进程）：
+
+```text
+VpnAbility vpn created, vfd=29
+VpnAbility starting tun2socks on fd=29 socksPort=10808
+VpnAbility tun2socks running (lib=libhevsocks5tun.so)
+```
+
+🧪 旁证：`ifconfig vpn-tun` 的 RX/TX 双向计数持续增长（不是只出不进）；
+`netstat` 出现 20+ 条 `127.0.0.1:10808` 的 `ESTABLISHED`（hev 把还原后的连接交给了内核）；
+第三方应用浏览器可正常加载网页。
+
+**为什么当初是关键**：hev 的后端是为 Linux/Android 写的，而 OHOS 的 vNIC fd 是否兼容
+**没有任何先例**。它要是不行，整条"TUN → tun2socks → 本地 SOCKS"的数据面就得换设计。
+
+**`Tun2socksStart` / `Stats` 回传的 `exitCode` / `lastError` 仍然有用**：它们是这条链路的
+常规可观测点，别再当成"回答 U3"的工具。
 
 ### 6.2 ✅ cgo 侧代码**已经在本机编过并测过**了（原 ❓ 已解除）
 
@@ -588,8 +668,8 @@ OHOS 的 vNIC fd 能否被它正常读写，**没有任何证据**。
 bridge=1 go=go1.26.4`，说明 Xray-core 真的链接进来了。
 
 > **仍未证实**：CI 的 ubuntu `CGO_ENABLED=1` 步骤（等价证据，但不是同一次运行）。
-> 另外这里**不是** `-buildmode=c-shared` 的 OHOS 交叉编译 ——
-> `libcore.so` 依然卡在 §1.1。
+> 另外这里**不是** `-buildmode=c-shared` 的 OHOS 交叉编译 —— 那一项见 §1.1，
+> **已于 2026-10-12 在 Linux 上完成并在真机上验证**（产物 `dlopen` 成功、返回 `26.3.27`）。
 
 ### 6.2b ⚠️ 本机没有真正的 bash
 
@@ -606,12 +686,14 @@ bridge=1 go=go1.26.4`，说明 Xray-core 真的链接进来了。
 
 **没做的**：完整编译、链接、`dlopen` 实际加载、线程启停的真实行为。
 
-### 6.4 ✅ ArkTS 侧**已经编译过**了（原 §3.2 已解除）
+### 6.4 ✅ ArkTS 侧**已经编译并真机运行**了（原 §3.2 已解除）
 
-`clean` 后真实执行 `CompileArkTS`（不是 `UP-TO-DATE`）→ `BUILD SUCCESSFUL`，
-产出未签名 HAP（2,535,152 字节）。命令与读数陷阱见 `docs/03-环境搭建.md` §5.2。
+`clean` 后真实执行 `CompileArkTS`（不是 `UP-TO-DATE`）→ `BUILD SUCCESSFUL`。
+命令与读数陷阱见 `docs/03-环境搭建.md` §5.2。
 
-> **但"能编译"≠"能运行"**：`MOCK_BRIDGE` 仍为 true，真机链路一步都没跑过。
+> **"能编译"→"能运行"这一跳已经完成（2026-10-12）**：`MOCK_BRIDGE` 已置为 `false`，
+> 签名 HAP 已在真机上安装、启动、并跑通了完整链路（见 §0 与 §6.1）。
+> 曾经的"真机链路一步都没跑过"**不再成立**。
 
 ### 6.5 ❓ geo 资源的按需下载路径未在真机验证
 
@@ -691,9 +773,19 @@ Release: <https://github.com/kuaizhongqiang/HarmonyBridge/releases/tag/v0.1.0>�
 
 ### 7.4 ✅ 发布流水线**已经真实运行过**（原 ❓ 已解除）
 
-本机逐件验证 + GitHub 上一次完整运行（见 §7.2）。剩下的长期项只有：
-runner 是**手动运行的进程**（重启后需重新拉起），以及 `libcore.so` 仍未产出
-（所以 HAP 里没有可用内核，见 §1.1）。
+本机逐件验证 + GitHub 上一次完整运行（见 §7.2）。剩下的长期项只有一项：
+**runner 是手动运行的进程**（没有装成 Windows 服务，重启后需重新拉起）。
+
+`libcore.so` 那一条**已不再成立**：产物已交付（但**不入库**，见 §0.1.5），
+所以**从 Release 下载的 HAP 里仍然没有内核** —— 这是"产物不入库"规则的必然结果，属有意设计。
+
+> ⚠️ **2026-10-12 实测到的一个操作细节**：推 `v0.2.0` 标签时，`verify` 与
+> `changelog` 两个作业在托管 runner 上全部通过
+> （含 `v0.2.0 agrees with AppScope/app.json5 versionName=0.2.0`），
+> 但 `build + publish` **一直排队** —— 因为自托管 runner
+> `DESKTOP-J1B0B8S-harmonybridge` 当时是 **offline**。
+> 也就是说：**推标签前要先手动把 runner 跑起来**（`C:\actions-runner-harmonybridge\run.cmd`），
+> 否则发布只会停在排队状态。
 
 ### 7.5 ⚠️ workflow YAML 没有自动化校验
 
@@ -703,16 +795,80 @@ runner 是**手动运行的进程**（重启后需重新拉起），以及 `libc
 
 ---
 
-## 8. 建议的执行顺序
+## 8. 建议的执行顺序（2026-10-12 重排）
 
-1. **注册 self-hosted runner**（解 §7.2）—— 不需要真机、不需要 Linux，
-   而且它会让 §4.1 的 cgo 修复**第一次被真正验证**；
-2. **装 WSL + 一个发行版**（解 §1.1 的前置），然后在 Linux 上编 `libcore.so`
-   —— 不需要真机，成败可验证；
-3. 在 Linux 上试编 `libhevsocks5tun.so`（解 §1.3），失败也如实记录；
-4. 采购真机（解 §1.2），然后按 **`AGENT.md` §9** 走 —— 第 4 步已改对（fd 交给 tun2socks）；
-5. 真机到位后立刻验的三件事：`blockedApplications` 是否止住环路（§2.2）、
-   IPv6 是否泄漏（§2.1）、hev 能否处理 vNIC fd（§6.1）。
+上一版的 5 步（注册 runner → 装 Linux 编两个 `.so` → 采购真机 → 按 `AGENT.md` §9 走）
+**已全部完成**，包括曾经被称为"最大的两个未知"的 §6.1（hev 接管 vNIC fd）与端到端出网。
 
-> 第 2 步和第 4 步依然是本项目**最大的两个未知**。在真机上跑通之前，
-> 任何人都不应对外宣称这个项目"可行"。
+现在的优先级：
+
+1. **修 IPv6 泄漏**（§2.1）—— 当前最实在的隐私缺陷，且**不需要重编内核**
+   （只动 `ets/vpnability/VpnAbility.ets#buildVpnConfig`）；
+2. **补 `geoip.dat` / `geosite.dat` 并验证按需下载**（§6.5）—— 没有它，"绕过大陆"是降级形态
+   （只剩"私有网段直连 + 其余走代理"）；
+3. **把设置页接线**：MTU / DNS / 分流模式 / 日志级别目前多数**改了不生效**（§9.5）；
+4. **节点持久化** + **前台常驻通知 / 断线重连**（§9.5）；
+5. **根治内核 `wired` 假话**（§2.6）—— 需要在 Linux 上改 `core.go` 后重编 `.so`；
+6. `docs/design/ui.md` 的 service 表按契约 §4 重写（§2.4）。
+
+> ⚠️ **每次推 tag 前先手动启动 self-hosted runner**
+> （`C:\actions-runner-harmonybridge\run.cmd`），否则 `publish` 会一直排队，见 §7.4。
+
+---
+
+## 9. 本轮（2026-10-12）已修复的**真机**缺陷
+
+这些**全都只在真机上暴露**：本机的编译、单测、静态检查一条都抓不到。值得逐条记住 ——
+它们的共同形态是"**看起来一切正常，实际已经坏了**"。
+
+### 9.1 ✅ 对 VpnExtensionAbility 调 `connectServiceExtensionAbility` 是错误用法
+
+**症状**：点"连接"后，系统层 VPN **已经生效**（`vpn-tun` 建好、默认路由被接管），
+但 `vpn.create()` **既不 resolve 也不 reject**，`DataPlane.start()` 因此从未被调用 →
+所有应用流量进 TUN 却没人处理 → **手机断网，且没有任何一处报错**。
+
+**证据**：`onRequest` 被以 ServiceExtension 语义触发，**6 ms 后连接即被系统断开**。
+
+**修复**：删掉该调用，只保留 `startVpnExtensionAbility`；`vpn.create()` 立刻返回 vfd
+（实测 27 / 29）。并加了 **8 秒看门狗**：未建成则 `processManager.exit(0)` 结束扩展进程，
+让系统撤销 VPN —— **"宁可连接失败，也不许静默断网"**。
+
+### 9.2 ✅ 内核跑错了进程（UI 进程 → 扩展进程）
+
+**症状**：用户切到别的应用后，**上行计数照涨、下行归零**；扩展进程 ~100% CPU 空转；
+`SYN_SENT` 堆积、`127.0.0.1:10808` 的 accept 队列堵死。
+
+**根因**：`CoreService.Start` 由 **UI 进程**调用，而 UI 进程退到后台后被系统**冻结**
+（`/proc/<pid>/stat` 的 cpuTicks 在 10 秒内 delta **恰好为 0**）；与此同时扩展进程里的
+tun2socks 仍在往 SOCKS 送流量。净效果是"**盯着它时能用、一切后台就废**"。
+
+**修复**：内核改由**扩展进程**自己拉起（这本就是 `ConnectionViewModel` 头注释写明的设计，
+此前实现与它不符），状态经新公共事件 `VPN_CORE_STATE` 跨进程上报。
+
+### 9.3 ✅ 隧道 MTU 与上行网卡不匹配
+
+**症状**：下行极慢（数十秒只有几百字节），上行正常。
+
+**根因**：上行 `rmnet0` 实测 MTU **1400**，而隧道 MTU 是 **1500**。内层满段被包上
+REALITY/TLS 头（约 +73 字节）后超过 1400，在外层还要被重新切一刀 → 大流量下包数翻倍。
+
+**修复**：隧道 MTU → **1280**（MSS 1240，外层 ≤ 1313）。推导见 `AGENT.md` §2.4。
+
+### 9.4 ✅ 扩展进程依赖只在首次传递的 `want.parameters`
+
+**根因**：SDK 注释写明 `want.parameters` **只在首次启动 VPN 时传递**
+（`@ohos.net.vpnExtension.d.ts:78`）。第二次连接起扩展收不到配置路径 →
+`CoreService.Start` 拿到空 `configLocation` 会**退化成"纯诊断调用"、静默不启动内核**。
+
+**修复**：扩展进程改为自己从 `context.filesDir` 推算路径（`ConfigStore` 提供唯一来源）。
+
+### 9.5 🆕 顺带查出的新缺口（**尚未修**）
+
+| 缺口 | 说明 |
+|---|---|
+| **没有"真正经隧道"的应用内自检** | `PingService.Tcping` 是**裸 TCP、不经代理**，且本应用在 `blockedApplications` 里 → **从应用内测任何域名都验证不了隧道**。要补一个"经 `127.0.0.1:<socksPort>` 的 SOCKS5 CONNECT 探测"（覆盖内核+出站，但仍**不**覆盖 TUN+hev） |
+| **内核日志级别锁死在 `warning`** | `ConfigService.Generate` 没把 `Options.LogLevel` 传下去（`config.go:126-130`），设置页的"日志级别"对内核**完全无效** → 内核报错在设备侧看不到 |
+| **`createVpnObserver` 运行时不存在** | `.d.ts` 标 `@since 26.0.0`，真机 `is not callable` → 授权结果目前拿不到回执 |
+| **节点无持久化** | 节点只在内存里，冷启动后回到内置演示节点。真机联调靠 `rawfile/local-nodes.txt` 种子（不入库） |
+| **设置页多数项未接线** | MTU / DNS / 分流模式 / 日志级别改了不生效（`SettingsViewModel` 只存在内存里） |
+| **无前台常驻通知、无断线重连** | VPN 扩展被系统回收时用户不会被告知 |

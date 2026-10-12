@@ -1,8 +1,15 @@
 # 原生代理内核设计（proxy-core skeleton）
 
-> 状态：**准备阶段骨架**。宿主侧 Go 代码已通过 `go build` / `go vet` 与 `gofmt`；
-> OHOS 交叉编译尚未产出可用 `.so`（原因见 §6.3）；tun fd 尚未打通。
+> 状态：**🧪 真机可运行（2026-10-12）**。宿主侧 Go 代码通过 `go build` / `go vet` / `gofmt`；
+> `libcore.so` **已产出**（约 34.5 MB，Xray-core `26.3.27`）并在真机上 `dlopen` 成功、
+> `GoInvoke` 可调；本地 SOCKS/HTTP 入站**确实在监听**；
+> tun→SOCKS 的桥接由 `libhevsocks5tun.so` 承担，**已在真机上接管 vNIC fd**。
 > 本文记录**已实现的事实**、**契约**与**未决问题**，三者分开写，不混淆。
+>
+> ⚠️ **本文件部分章节写于真机验证之前**：§6.3（"工具链受阻"）、§6.5（打通链路"留给下一阶段"）、
+> 以及 `wired` 相关的多处表述（"恒为 false 是正确的"）**已被真机结果推翻**。
+> 已在对应位置就地标注；**当前权威状态**见
+> [`../../README.md`](../../README.md) 的验证表与 [`../../TODO.md`](../../TODO.md) §0。
 
 ## 1. 分层
 
@@ -145,12 +152,18 @@ panic 穿越 C ABI 会让进程直接 abort，UI 连提示都来不及显示。�
 
 `start` 缺省为 `false`，只做「读配置 → 用 Xray 的 loader 解析 → 校验」。
 
-⚠️ **理由已随裁决更新（原表述过时）**：原文写的是"目前没有任何可用方式把 tun fd 交给
+⚠️ **理由已随裁决更新（2026-10-12 再次更新）**：原文写的是"目前没有任何可用方式把 tun fd 交给
 Xray 的入站"。冻结裁决（[`ipc-contract.md`](ipc-contract.md) §2）**不再走这条路** ——
-vNIC fd 交给 tun2socks，内核只做本地 SOCKS/HTTP 入站。真实理由是：**本地 SOCKS/HTTP
-入站的监听与 tun2socks 都还没有实现**，此刻启动只会得到一个**没有任何进程在监听**的进程，
-比不启动更难排查。所以 `wired` 目前**恒为 false**，骨架先保证「配置对不对」这个最有价值的
-判断可用。
+vNIC fd 交给 tun2socks，内核只做本地 SOCKS/HTTP 入站。
+
+🧪 **现在这两件都已实现并在真机上跑通**（`127.0.0.1:10808 LISTEN`；`hev` 已在 vfd 上运行）。
+所以当时那句"本地 SOCKS/HTTP 入站的监听与 tun2socks 都还没有实现"**已经过时**；
+`start` 缺省 `false` 现在只是一个**保守默认** —— "先校验配置、再进运行态"仍是好习惯。
+
+🔴 **但内核返回的 `wired` 仍恒为 `false`，且它的说明文字是错的**：
+`core.go:110-114` / `:210` 断言"没有任何入站真的在监听"，而下面 **20 行**的 `:288-301`
+其实**真的启动了 Xray**。UI 侧因此**不采信该字段**，改由公共事件 `VPN_CORE_STATE`
+按「内核已启动 且 tun2socks 已运行」推算，见 [`ipc-contract.md`](ipc-contract.md) §4.1/§4.2。
 
 ## 5. 构建管线
 
@@ -396,6 +409,9 @@ AssetLocation = "xray.location.asset"
 > ⚠️ **这条链本身也已改判（冻结裁决 `ipc-contract.md` §2）**：下面这份"把 fd 交给 Xray 的
 > tun 入站"的清单**不再是要做的事** —— vNIC fd 改交 **tun2socks**，内核只做本地
 > SOCKS/HTTP 入站（见 `docs/00-技术路线可行性.md` §11）。清单保留为历史记录。
+>
+> 🧪 **且那条替代路线已于 2026-10-12 在真机上跑通**：`hev` 接管 vNIC fd、
+> 内核的本地 SOCKS 入站确实在监听、端到端可出网。**下面的清单只是历史，不要再照着做。**
 
 **打通这条链需要做的（留给下一阶段）**：
 
@@ -609,10 +625,12 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
    确实会生效；而 `destOverride` **不能**写 bittorrent ——
    `infra/conf/xray.go:75-86` 只接受 http/tls/quic/fakedns。
 
-   **仍未验证**：以上全是配置语义层面的改动，`go test` 只能证明"内核 loader 接受
-   这份配置"，**没有任何一条在真机上跑过流量**，所以"大陆域名确实直连了"
-   依旧属于 ❓ 而非 ✅。资源就位后的分支更是连 loader 都过不了
-   （本地没有 `.dat`），只有一条负向断言守着它（见下）。
+   **验证状态（2026-10-12 更新）**：以上全是配置语义层面的改动，`go test` 只能证明
+   "内核 loader 接受这份配置"。🧪 真机上**已经跑过流量**（端到端出网已通），
+   但**"大陆域名确实直连了"仍然属于 ❓** —— 因为 `geoip.dat`/`geosite.dat` **至今没有打包**，
+   rule 模式处在降级形态（只有"私有网段直连 + 其余走代理"），**按国家分流的规则根本没生成**。
+   资源就位后的分支更是连 loader 都过不了（本地没有 `.dat`），只有一条负向断言守着它（见下）。
+   见 [`../../TODO.md`](../../TODO.md) §6.5。
 
 ### 7.5 现状更新（2026-10-11，契约 §5 收敛这一轮）
 
@@ -639,9 +657,14 @@ OHOS 的对应物是 `VpnConnection.protect(socket)`。但当前存在两个问�
 4. **`PingService.Tcping` 的 `delayMs` → `latencyMs` 已落地**，ArkTS 侧本来就按
    `latencyMs` 解析，所以这条改的是**真 bug**（否则真机上一辈子拿不到延迟）。
 
-5. **`Wired` 仍然恒为 false，这是正确的**：本地 SOCKS/HTTP 监听与 tun2socks
-   都没有实现，所以"没有任何进程真的在监听"。`SpeedTest` 同理返回 0 + `notes`。
-   **不要把这两个值"顺手填上"**。
+5. ~~**`Wired` 仍然恒为 false，这是正确的**~~ → **🔴 更正（2026-10-12）：这句话是错的。**
+   本地 SOCKS/HTTP 监听与 tun2socks **都已经实现并在真机上跑通**，
+   `golang/service/core/core.go` 的 `:288-301` 其实**真的启动了 Xray**，
+   所以"没有任何进程真的在监听"**不成立**。
+   那个 `wired` 是内核里的一处**真缺陷**（字段与注释都在说假话），不是"保守的正确值"。
+   UI 侧已不再采信它，改由公共事件 `VPN_CORE_STATE` 推算 —— 见
+   [`ipc-contract.md`](ipc-contract.md) §4.1/§4.2 与 [`../../TODO.md`](../../TODO.md) §2.6。
+   `SpeedTest` 返回 0 + `notes` **仍然是正确的占位**（那条不要改）。
 
 ## 8. 测试与验收
 
@@ -657,9 +680,12 @@ CGO_ENABLED=1 go test .   # 根包，需本机 C 编译器（Linux/WSL/CI）
 版本服务确实拿到 Xray 版本、校验器接受最小 freedom 配置并拒绝垃圾与未知协议、
 `CoreService.Status` 与 `Stop` 的幂等性。
 
-真机侧（**待补**，需要一台 HarmonyOS 设备）：
+真机侧（🧪 **2026-10-12 已全部执行**，HUAWEI `TYR-AL00` / API 24）：
 
-1. `hvigorw assembleHap` 能通过（含 NAPI 原生构建）；
-2. App 启动后 `Invoke("VersionService.GetVersion","{}")` 返回真实 Xray 版本；
-3. 缺 `libcore.so` 时返回可读错误而不是闪退；
-4. tun fd 打通后：`Wired=true`、建立连接、DNS 正常、无路由环路。
+1. ✅ `hvigorw assembleHap` 能通过（含 NAPI 原生构建）；签名后 `hdc install` 成功；
+2. ✅ App 启动后 `Invoke("VersionService.GetVersion","{}")` 返回真实 Xray 版本 `26.3.27`；
+3. ⏳ 缺 `libcore.so` 时返回可读错误而不是闪退 —— 逻辑已实现（`Bridge.coreAvailable()` +
+   失败信封落日志），但**没有专门制造"缺 `.so`"的场景去验**，仍属 ❓；
+4. ✅ vNIC fd 交给 `hev-socks5tun` 后：建立连接、DNS 正常、无路由环路。
+   ⚠️ **判据更正**：原来这里写的是 `Wired=true`，但那个字段是坏的（见 §7.5 第 5 条），
+   正确判据是「`127.0.0.1:10808` 可连」+「`vpn-tun` 双向计数增长」。

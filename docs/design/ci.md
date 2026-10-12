@@ -21,7 +21,16 @@
 | Node / Go / git / git-lfs | `v24.14.0` / `go1.26.4` / `2.53.0.windows.2` / `3.7.1` | `scripts/check-env.ps1` |
 | JDK | JBR `OpenJDK 25.0.2`（DevEco 自带） | `scripts/check-env.ps1` |
 | 签名工具 | `sdk/default/openharmony/toolchains/lib/hap-sign-tool.jar`（存在） | `scripts/check-env.ps1` |
-| 真机 / 模拟器 | **没有** | 项目现状 |
+| 真机 / 模拟器 | **有**：HUAWEI `TYR-AL00`（nova 14 活力版 / API 24），USB 接入且 `hdc` 可识别 | 项目现状（2026-10-12 更新） |
+| 自托管 runner | **已注册**：`DESKTOP-J1B0B8S-harmonybridge`，标签 `[self-hosted, Windows, X64, harmonyos]` | `gh api .../actions/runners`（2026-10-12 复核） |
+
+> ⚠️ **两条 2026-10-12 实测到的重要事实**：
+>
+> 1. **runner 是手动进程，不是 Windows 服务**（装服务要管理员权限），
+>    所以**机器重启后它是 offline 的** —— 推 tag 只会在 `build + publish` 上一直排队。
+>    推 tag 前先跑 `C:\actions-runner-harmonybridge\run.cmd`。
+> 2. **托管 runner 上无法产签名 HAP** 这条判断**仍然成立且不需要改**：
+>    `release.yml` 发布的是**未签名** HAP（见 §5），签名只在本地（DevEco 自动签名）做。
 
 由此推出整个设计的出发点：
 
@@ -347,7 +356,8 @@ push tag v*
 | **托管 runner 上不产出 HAP** | HAP 只在 `release.yml` 的 `publish`（自托管）里构建；`ci.yml` 的 `build-hap` 仍 `if: false` | `CI` 不能替代分支上的本机构建；PR 合入前必须有人在 DevEco 里真构建过 | 让每次 push 都编 HAP 是**有意的非目标**；若要，放开 `build-hap` 的 `if` |
 | **发布流水线从未在 GitHub 上真实运行过** | ✅ **已解除**（2026-10-11）：tag `v0.1.0` 一次跑通标签 → 门禁 → 自托管构建 → 发布，Release 已上线，下载后校验和一致 | 首次运行暴露并修掉了 3 个接线缺陷（`pwsh` 不存在、`DEVECO_HOME` 未跨 step 传递、`java` 不在 PATH 上），见 `TODO.md` §7.2b | — |
 | **runner 是手动进程** | `run.cmd` 不是 Windows 服务（装服务需管理员权限） | **机器重启后需要重新拉起 runner**，否则 tag 发布会在"等 runner"上挂着 | 需要时以管理员身份 `svc.cmd install` + `svc.cmd start` |
-| **`libcore.so` 不在任何流水线里** | 交叉编译需要 OHOS NDK，且当前被 `socklen_t` 冲突挡住（`TODO.md` §1.1） | 产出的 HAP **不含可用内核** | 解决 `TODO.md` §1.1 之后 |
+| **`libcore.so` 不在任何流水线里**（**这是有意的**） | 交叉编译需在 Linux 上做；且 `.so` 按纪律**不入库** → CI 从 git 检出后构建，HAP 里**仍然没有内核** | 从 Release 下载的 HAP **不含可用内核**，只能自己本地构建 | 这是"产物不入库"的必然结果。若要让 Release 可用，需选：对象存储 / Release 资产回填 / runner 预置（`HANDOFF.md` §6 第 1 项，**待拍板**） |
+| **`publish` 需要 runner 在线** | runner 是**手动进程**（非 Windows 服务） | 重启后 runner 离线 → `build + publish` **一直排队** | 推 tag 前先跑 `C:\actions-runner-harmonybridge\run.cmd` |
 | **不跑 `ohosTest`** | 无设备、无模拟器 | 只能靠本机实测；PR 模板里有"未做实机验证"勾选项要求如实标注 | 有真机或模拟器后 |
 | **静态检查未进 CI** | DevEco Code Linter（`code-linter.json5`）需要在 DevEco 内运行 | ArkTS 规则只能靠本机跑；`repo-hygiene` 查不到 ArkTS 问题 | 找到可在命令行调用 codelinter 的方式后（**待确认**：DevEco 的 codelinter CLI 接口未在本机验证） |
 | **workflow YAML 无自动校验** | `.github/**` 的 YAML 只由 GitHub 自己解析 | 写坏要到 push 之后才暴露 | **本轮是用本机 PyYAML 手验的结构**（`on`/`jobs`/`runs-on`/`needs`/`steps`），未进 CI —— 加它需要引入 YAML 依赖，与本仓库"零 Node 依赖"冲突，**待决策** |
@@ -452,8 +462,10 @@ cmd /c "`"$dev\tools\hvigor\bin\hvigorw.bat`" --mode module -p product=default -
 - `v<major>.<minor>.<patch>`：正式版本，触发 `release.yml`。
 - 预发布用 `v1.2.3-rc.1` 形式（正则允许后缀，会自动标成 GitHub prerelease）。
 - **打 tag 前**：`main` 上 CI 全绿 + `AppScope/app.json5` 版本号已更新。
-  真机验证**不再是前置条件**：项目还没有真机，而 tag 的意义是记录里程碑
-  （未签名 HAP + 已知限制写进 release notes，见第 5.3 节）。
+  ⚠️ **真机验证不是打 tag 的前置条件**（tag 的意义是记录里程碑，
+  未签名 HAP + 已知限制写进 release notes，见第 5.3 节）。
+  但**「推 tag 前先手动启动 self-hosted runner」是操作前提** —— runner 不是 Windows 服务，
+  机器重启后是 offline 的，否则 `build + publish` 会一直排队（`TODO.md` §7.4）。
 
 ### 7.3 发布产物（目标形态 = 已实现形态）
 
